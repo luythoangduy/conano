@@ -61,46 +61,63 @@ class SCLLoss(nn.Module):
 
 @LOSS.register_module
 class DenseLoss(nn.Module):
-    def __init__(self, lam=1, temperature=0.1, use_prototypes=True, proto_momentum=0.99):
+    def __init__(self, lam=1, temperature=0.1, use_prototypes=True, learning_rate=0.01):
         super(DenseLoss, self).__init__()
         self.loss = self.densecl
         self.lam = lam
         self.temperature = temperature
         self.use_prototypes = use_prototypes
-        self.proto_momentum = proto_momentum
-        # Prototype bank: stores prototypes for each class
-        self.prototype_bank = {}  # {class_id: feature map}
+        self.learning_rate = learning_rate
+        # Prototype bank: stores learnable prototypes for each class and scale
+        # Structure: {class_id: {scale_key: nn.Parameter}}
+        self.prototype_bank = {}
         self.initialized_classes = set()
 
-    @torch.no_grad()
-    def update_prototypes(self, k_grid, labels):
-        """Update prototype bank using momentum update"""
-        for i, label in enumerate(labels):
-            label_id = label.item()
-            k_feature = k_grid[i].detach()  # (c, h, w)
+    def get_scale_key(self, shape):
+        """Generate a key for the feature scale based on shape"""
+        return f"{shape[0]}_{shape[1]}_{shape[2]}"
 
-            if label_id not in self.initialized_classes:
-                # Initialize prototype for this class
-                self.prototype_bank[label_id] = k_feature.clone()
-                self.initialized_classes.add(label_id)
-            else:
-                # Momentum update: proto = proto * m + feature * (1 - m)
-                self.prototype_bank[label_id] = (
-                    self.prototype_bank[label_id] * self.proto_momentum +
-                    k_feature * (1. - self.proto_momentum)
-                )
+    def initialize_prototype(self, label_id, feature_shape, device, scale_key):
+        """Initialize a learnable prototype for a new class at specific scale"""
+        if label_id not in self.prototype_bank:
+            self.prototype_bank[label_id] = {}
+            self.initialized_classes.add(label_id)
 
-    def densecl(self, q_b, k_b, q_grid, k_grid, labels):
+        if scale_key not in self.prototype_bank[label_id]:
+            # Create learnable parameter with random initialization or zero
+            prototype = nn.Parameter(torch.zeros(feature_shape, device=device, requires_grad=True))
+            self.prototype_bank[label_id][scale_key] = prototype
+            # Register parameter to make it part of the module
+            self.register_parameter(f"proto_{label_id}_{scale_key}", prototype)
+
+    def densecl(self, q_b, k_b, q_grid, k_grid, labels, k_grid_momentum=None):
         """
-        Dense contrastive learning with momentum prototypes
-        - Positive: spatial correspondence
-        - Negative: prototypes from different classes
+        Dense contrastive learning with learnable prototypes
+        - Positive: q_grid <-> k_grid (spatial correspondence)
+        - Negative: q_grid <-> prototypes from different classes
+        - Alignment: prototypes <-> k_grid_momentum (momentum features for prototype)
         """
         # Normalize features
         q_b = F.normalize(q_b, p=2, dim=1)  # (b, c, h, w)
         k_b = F.normalize(k_b, p=2, dim=1)  # (b, c, h, w)
         q_grid = F.normalize(q_grid, p=2, dim=1)  # (b, c, h, w)
         k_grid = F.normalize(k_grid, p=2, dim=1)  # (b, c, h, w)
+
+        # Use k_grid_momentum for prototype alignment if provided, otherwise use k_grid
+        if k_grid_momentum is not None:
+            k_grid_momentum = F.normalize(k_grid_momentum, p=2, dim=1)  # (b, c, h, w)
+            k_grid_for_proto = k_grid_momentum
+        else:
+            k_grid_for_proto = k_grid
+
+        # Get scale key for this feature resolution
+        scale_key = self.get_scale_key(k_grid[0].shape)
+
+        # Initialize prototypes for new classes at this scale
+        if self.use_prototypes:
+            for i, label in enumerate(labels):
+                label_id = label.item()
+                self.initialize_prototype(label_id, k_grid_for_proto[i].shape, k_grid_for_proto.device, scale_key)
 
         # Flatten the spatial dimensions
         q_b_flat = q_b.view(q_b.size(0), q_b.size(1), -1)  # (b, c, h*w)
@@ -124,22 +141,30 @@ class DenseLoss(nn.Module):
         # Apply temperature scaling to the positive similarity
         pos_sim = pos_sim / self.temperature
 
-        # Update prototypes for each class using momentum
-        if self.use_prototypes and self.training:
-            self.update_prototypes(k_grid, labels)
-
         # Prepare to store negative similarities
         neg_sim_list = []
 
+        # Additional loss for prototype alignment with current features
+        proto_align_loss = 0.0
+
         if self.use_prototypes and len(self.initialized_classes) > 1:
-            # Use prototypes as negatives
+            # Use learnable prototypes as negatives
             for i in range(q_b.size(0)):
                 label_id = labels[i].item()
-                # Get prototypes from different classes
+
+                # Add alignment loss: make prototype close to momentum features
+                if label_id in self.prototype_bank and scale_key in self.prototype_bank[label_id]:
+                    proto = self.prototype_bank[label_id][scale_key]
+                    proto_norm = F.normalize(proto, p=2, dim=0)  # (c, h, w)
+                    k_momentum_norm = F.normalize(k_grid_for_proto[i], p=2, dim=0)  # (c, h, w)
+                    # L2 loss between prototype and momentum feature
+                    proto_align_loss += F.mse_loss(proto_norm, k_momentum_norm)
+
+                # Get prototypes from different classes as negatives (at the same scale)
                 neg_prototypes = []
-                for proto_label, prototype in self.prototype_bank.items():
-                    if proto_label != label_id:
-                        neg_prototypes.append(prototype)
+                for proto_label, scale_dict in self.prototype_bank.items():
+                    if proto_label != label_id and scale_key in scale_dict:
+                        neg_prototypes.append(scale_dict[scale_key])
 
                 if len(neg_prototypes) == 0:
                     # Fallback to random negative if no prototypes available
@@ -154,7 +179,7 @@ class DenseLoss(nn.Module):
                     proto_idx = torch.randint(0, len(neg_prototypes), (1,)).item()
                     neg_prototype = F.normalize(neg_prototypes[proto_idx], p=2, dim=0)  # (c, h, w)
                     neg_proto_flat = neg_prototype.view(neg_prototype.size(0), -1)  # (c, h*w)
-                    # Compare with query
+                    # Compare with query - this will compute gradients for the prototype
                     neg_sim = F.cosine_similarity(q_grid_flat[i].unsqueeze(0), neg_proto_flat.unsqueeze(0), dim=1)  # (1, h*w)
 
                 neg_sim_list.append(neg_sim)
@@ -177,9 +202,14 @@ class DenseLoss(nn.Module):
         neg_sim = neg_sim / self.temperature  # Apply temperature scaling
 
         # Contrastive loss (InfoNCE Loss)
-        loss = -torch.log(torch.exp(pos_sim) / (torch.exp(pos_sim) + torch.exp(neg_sim) + 1e-6))
+        contrastive_loss = -torch.log(torch.exp(pos_sim) / (torch.exp(pos_sim) + torch.exp(neg_sim) + 1e-6))
 
-        return loss.mean()
+        # Total loss: contrastive + prototype alignment
+        total_loss = contrastive_loss.mean()
+        if self.use_prototypes and proto_align_loss > 0:
+            total_loss = total_loss + self.learning_rate * proto_align_loss / q_b.size(0)
+
+        return total_loss
 
     def forward(self, q_b, k_b, q_grid, k_grid, labels):
         if not isinstance(q_b, list):
