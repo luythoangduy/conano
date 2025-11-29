@@ -422,18 +422,34 @@ def rd(pretrained=False, **kwargs):
 
 
 class RDLGC(nn.Module):
-    def __init__(self, model_t, model_s, dp=False):
+    def __init__(self, model_t, model_s, dp=False, momentum=0.99):
         super(RDLGC, self).__init__()
         self.net_t = get_model(model_t)
         self.mff_oce = MFF_OCE(Bottleneck, 3)
         self.proj_layer = MultiProjectionLayer(base=64, dp=dp)
+
+        # Momentum encoder for creating stable prototypes (BYOL-style)
+        self.proj_layer_momentum = MultiProjectionLayer(base=64, dp=dp)
+        # Copy weights from online network
+        self.proj_layer_momentum.load_state_dict(self.proj_layer.state_dict())
+        # Freeze momentum encoder
+        for param in self.proj_layer_momentum.parameters():
+            param.requires_grad = False
+
         self.net_s = get_model(model_s)
         self.frozen_layers = ['net_t']
+        self.momentum = momentum
 
     def freeze_layer(self, module):
         module.eval()
         for param in module.parameters():
             param.requires_grad = False
+
+    @torch.no_grad()
+    def update_momentum_encoder(self):
+        """Update momentum encoder using exponential moving average"""
+        for param_q, param_k in zip(self.proj_layer.parameters(), self.proj_layer_momentum.parameters()):
+            param_k.data = param_k.data * self.momentum + param_q.data * (1. - self.momentum)
 
     def train(self, mode=True):
         self.training = mode
@@ -448,7 +464,9 @@ class RDLGC(nn.Module):
         feats_t = self.net_t(imgs)
         feats_k = self.net_t(aug_imgs)
         feats_t_q_grid = self.proj_layer(feats_t)
-        feats_t_k_grid = self.proj_layer(feats_k)
+        # Use momentum encoder for k_grid to create stable prototypes
+        with torch.no_grad():
+            feats_t_k_grid = self.proj_layer_momentum(feats_k)
 
         feats_t_q = [f.detach() for f in feats_t]
         feats_t_k = [f.detach() for f in feats_k]

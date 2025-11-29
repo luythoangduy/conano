@@ -82,7 +82,8 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
         self.model = Namespace()
         self.model.name = 'rd_lgc'
         self.model.kwargs = dict(pretrained=False, checkpoint_path=checkpoint_path, strict=True, model_t=self.model_t,
-                                 model_s=self.model_s, dp=False)
+                                 model_s=self.model_s, dp=False,
+                                 momentum=0.99)  # Constant momentum
 
         # ==> evaluator
         self.evaluator.kwargs = dict(metrics=self.metrics, pooling_ks=None, max_step_aupro=100,
@@ -98,7 +99,7 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
         # ==> trainer
         self.trainer.name = 'RDLGCTrainer'
         self.trainer.logdir_sub = ''
-        self.trainer.resume_dir = ''
+        self.trainer.resume_dir = 'RDLGCTrainer_configs_rd_rd_mvtec_20251129-062036'
         self.trainer.epoch_full = self.epoch_full
         self.trainer.scheduler_kwargs = dict(
             name='step', lr_noise=None, noise_pct=0.67, noise_std=1.0, noise_seed=42, lr_min=self.lr / 1e2,
@@ -117,8 +118,8 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
         # ==> loss
         self.loss.loss_terms = [
             dict(type='CosLoss', name='cos', avg=False, lam=1.0),
-            dict(type='DenseLoss', name='dense', lam=1.0, temperature=0.05),
-            dict(type='SCLLoss', name='scl', lam=1.0, temperature=0.05),
+            dict(type='DenseLoss', name='dense', lam=1.0, temperature=0.1),
+            dict(type='SCLLoss', name='scl', lam=1.0, temperature=0.1),
         ]
 
         # ==> logging

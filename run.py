@@ -5,8 +5,8 @@ from util.util import run_pre, init_checkpoint
 from trainer import get_trainer
 import warnings
 warnings.filterwarnings("ignore")
-import proctitle
-proctitle.setproctitle("Duy is training")
+import setproctitle
+setproctitle.setproctitle("Duy is training")
 
 def main():
 	parser = argparse.ArgumentParser()

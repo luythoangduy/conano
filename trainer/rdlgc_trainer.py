@@ -92,6 +92,12 @@ class RDLGCTrainer(BaseTrainer):
             loss = loss_cos + loss_glb + loss_den
 
         self.backward_term(loss, self.optim)
+
+        # Update momentum encoder after each optimization step (BYOL-style)
+        net_module = self.net.module if hasattr(self.net, 'module') else self.net
+        if hasattr(net_module, 'update_momentum_encoder'):
+            net_module.update_momentum_encoder()
+
         update_log_term(self.log_terms.get('cos'), reduce_tensor(loss_cos, self.world_size).clone().detach().item(), 1,
                         self.master)
         update_log_term(self.log_terms.get('glb'), reduce_tensor(loss_glb, self.world_size).clone().detach().item(), 1,

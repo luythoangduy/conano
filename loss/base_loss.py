@@ -61,18 +61,46 @@ class SCLLoss(nn.Module):
 
 @LOSS.register_module
 class DenseLoss(nn.Module):
-    def __init__(self, lam=1, temperature=0.1):
+    def __init__(self, lam=1, temperature=0.1, use_prototypes=True, proto_momentum=0.99):
         super(DenseLoss, self).__init__()
         self.loss = self.densecl
         self.lam = lam
         self.temperature = temperature
+        self.use_prototypes = use_prototypes
+        self.proto_momentum = proto_momentum
+        # Prototype bank: stores prototypes for each class
+        self.prototype_bank = {}  # {class_id: feature map}
+        self.initialized_classes = set()
+
+    @torch.no_grad()
+    def update_prototypes(self, k_grid, labels):
+        """Update prototype bank using momentum update"""
+        for i, label in enumerate(labels):
+            label_id = label.item()
+            k_feature = k_grid[i].detach()  # (c, h, w)
+
+            if label_id not in self.initialized_classes:
+                # Initialize prototype for this class
+                self.prototype_bank[label_id] = k_feature.clone()
+                self.initialized_classes.add(label_id)
+            else:
+                # Momentum update: proto = proto * m + feature * (1 - m)
+                self.prototype_bank[label_id] = (
+                    self.prototype_bank[label_id] * self.proto_momentum +
+                    k_feature * (1. - self.proto_momentum)
+                )
 
     def densecl(self, q_b, k_b, q_grid, k_grid, labels):
+        """
+        Dense contrastive learning with momentum prototypes
+        - Positive: spatial correspondence
+        - Negative: prototypes from different classes
+        """
         # Normalize features
         q_b = F.normalize(q_b, p=2, dim=1)  # (b, c, h, w)
         k_b = F.normalize(k_b, p=2, dim=1)  # (b, c, h, w)
         q_grid = F.normalize(q_grid, p=2, dim=1)  # (b, c, h, w)
-        k_grid = F.normalize(k_grid, p=2, dim=1)  # (b, c, h*w)
+        k_grid = F.normalize(k_grid, p=2, dim=1)  # (b, c, h, w)
 
         # Flatten the spatial dimensions
         q_b_flat = q_b.view(q_b.size(0), q_b.size(1), -1)  # (b, c, h*w)
@@ -81,16 +109,6 @@ class DenseLoss(nn.Module):
 
         # Get the index of the most similar features between q_b and k_b
         max_sim_idx = torch.argmax(similarity_matrix, dim=-1)  # (b, h*w)
-
-        # k = 3
-        # b, c, h, w = q_b.size()
-        # q_b_flat = q_b.view(b, c, -1).transpose(1, 2)   # (b, h*w, c)
-
-        # k_b_unfold = F.unfold(k_b, kernel_size=3, padding=1)  # (b, c*3*3, h*w)
-        # k_b_unfold = k_b_unfold.view(b, c, 3 * 3, h * w).permute(0, 3, 1, 2)   # (b, h*w, c, 3*3)
-
-        # similarity_local = torch.einsum('bkc,bkci->bki', q_b_flat, k_b_unfold)  # (b, h*w, 9)
-        # max_sim_idx = torch.argmax(similarity_local, dim=-1)  # (b, h*w)
 
         # Flatten q_grid and k_grid for grid-level comparison
         q_grid_flat = q_grid.view(q_grid.size(0), q_grid.size(1), -1)  # (b, c, h*w)
@@ -106,26 +124,53 @@ class DenseLoss(nn.Module):
         # Apply temperature scaling to the positive similarity
         pos_sim = pos_sim / self.temperature
 
-        # Prepare to store negative similarities (one negative sample per batch element)
+        # Update prototypes for each class using momentum
+        if self.use_prototypes and self.training:
+            self.update_prototypes(k_grid, labels)
+
+        # Prepare to store negative similarities
         neg_sim_list = []
 
-        for i in range(q_b.size(0)):
-            # Get indices of all different-class samples
-            neg_indices = torch.where(labels != labels[i].item())[0]
+        if self.use_prototypes and len(self.initialized_classes) > 1:
+            # Use prototypes as negatives
+            for i in range(q_b.size(0)):
+                label_id = labels[i].item()
+                # Get prototypes from different classes
+                neg_prototypes = []
+                for proto_label, prototype in self.prototype_bank.items():
+                    if proto_label != label_id:
+                        neg_prototypes.append(prototype)
 
-            # If no negative samples are available, skip this sample
-            if len(neg_indices) == 0:
-                return torch.tensor(0.0, device=q_b.device)
+                if len(neg_prototypes) == 0:
+                    # Fallback to random negative if no prototypes available
+                    neg_indices = torch.where(labels != label_id)[0]
+                    if len(neg_indices) == 0:
+                        return torch.tensor(0.0, device=q_b.device)
+                    rand_idx = torch.randint(0, len(neg_indices), (1,))
+                    neg_k_grid_flat = k_grid_flat[neg_indices[rand_idx]]
+                    neg_sim = F.cosine_similarity(q_grid_flat[i].unsqueeze(0), neg_k_grid_flat, dim=1)
+                else:
+                    # Randomly select one prototype from different classes
+                    proto_idx = torch.randint(0, len(neg_prototypes), (1,)).item()
+                    neg_prototype = F.normalize(neg_prototypes[proto_idx], p=2, dim=0)  # (c, h, w)
+                    neg_proto_flat = neg_prototype.view(neg_prototype.size(0), -1)  # (c, h*w)
+                    # Compare with query
+                    neg_sim = F.cosine_similarity(q_grid_flat[i].unsqueeze(0), neg_proto_flat.unsqueeze(0), dim=1)  # (1, h*w)
 
-            # Randomly select one negative sample from different-class samples
-            rand_idx = torch.randint(0, len(neg_indices), (1,))
-            neg_k_grid_flat = k_grid_flat[neg_indices[rand_idx]]  # (1, c, h*w)
+                neg_sim_list.append(neg_sim)
+        else:
+            # Original random negative sampling
+            for i in range(q_b.size(0)):
+                neg_indices = torch.where(labels != labels[i].item())[0]
 
-            # Compute the cosine similarity between q_grid_flat[i] and the selected negative sample
-            neg_sim = F.cosine_similarity(q_grid_flat[i].unsqueeze(0), neg_k_grid_flat, dim=1)  # (1, h*w)
+                if len(neg_indices) == 0:
+                    return torch.tensor(0.0, device=q_b.device)
 
-            # Store the negative similarity
-            neg_sim_list.append(neg_sim)
+                rand_idx = torch.randint(0, len(neg_indices), (1,))
+                neg_k_grid_flat = k_grid_flat[neg_indices[rand_idx]]
+
+                neg_sim = F.cosine_similarity(q_grid_flat[i].unsqueeze(0), neg_k_grid_flat, dim=1)
+                neg_sim_list.append(neg_sim)
 
         # Concatenate all negative similarities
         neg_sim = torch.cat(neg_sim_list, dim=0)  # (b, h*w)
