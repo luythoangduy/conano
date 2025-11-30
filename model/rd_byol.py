@@ -13,7 +13,8 @@ Reference: BYOL (Bootstrap Your Own Latent)
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from model import get_model, MODEL
+# Use relative import to avoid circular dependency
+from . import get_model, MODEL
 
 
 # ============================================================================
@@ -125,16 +126,20 @@ class MFF_OCE(nn.Module):
         self._norm_layer = norm_layer
         self.base_width = width_per_group
 
-        self.inplanes = 256
+        # Fixed: inplanes should be 256 * block.expansion (256 * 4 = 1024)
+        self.inplanes = 256 * block.expansion
         self.dilation = 1
-        self.bn1 = norm_layer(256)
-        self.bn2 = norm_layer(256)
-        self.bn3 = norm_layer(512)
-        self.conv1 = nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=1, bias=False)
-        self.conv2 = nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1, bias=False)
-        self.conv3 = nn.Conv2d(512, 512, kernel_size=3, stride=2, padding=1, bias=False)
+        # bn_layer needs to be created AFTER concat, which has inplanes*3 channels
+        self.bn_layer = self._make_layer(block, 512, layers, stride=2)
+
+        # Convolution layers for feature processing
+        self.conv1 = nn.Conv2d(64 * block.expansion, 128 * block.expansion, kernel_size=3, stride=2, padding=1, bias=False)
+        self.bn1 = norm_layer(128 * block.expansion)
         self.relu = nn.ReLU(inplace=True)
-        self.bn_layer = self._make_layer(block, 256, layers)
+        self.conv2 = nn.Conv2d(128 * block.expansion, 256 * block.expansion, kernel_size=3, stride=2, padding=1, bias=False)
+        self.bn2 = norm_layer(256 * block.expansion)
+        self.conv3 = nn.Conv2d(128 * block.expansion, 256 * block.expansion, kernel_size=3, stride=2, padding=1, bias=False)
+        self.bn3 = norm_layer(256 * block.expansion)
 
     def _make_layer(self, block, planes, blocks, stride=1, dilate=False):
         norm_layer = self._norm_layer
@@ -143,13 +148,15 @@ class MFF_OCE(nn.Module):
         if dilate:
             self.dilation *= stride
             stride = 1
+        # Fixed: After concat, input has inplanes*3 channels (256+512+1024=1792 for expansion=4)
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
-                nn.Conv2d(self.inplanes, planes * block.expansion, 1, stride, bias=False),
+                nn.Conv2d(self.inplanes * 3, planes * block.expansion, 1, stride, bias=False),
                 norm_layer(planes * block.expansion),
             )
         layers = []
-        layers.append(block(self.inplanes, planes, stride, downsample, base_width=self.base_width,
+        # First layer receives concatenated features with inplanes*3 channels
+        layers.append(block(self.inplanes * 3, planes, stride, downsample, base_width=self.base_width,
                             dilation=previous_dilation, norm_layer=norm_layer))
         self.inplanes = planes * block.expansion
         for _ in range(1, blocks):
@@ -354,29 +361,30 @@ class RDLGC_BYOL(nn.Module):
     def train_forward(self, imgs, aug_imgs):
         """
         Forward pass during training.
-        
+
         Online path: imgs → encoder → projector → predictor → q_grid
         Target path: aug_imgs → encoder → projector → k_grid (NO predictor!)
-        
+
         The asymmetry (predictor only in online) prevents collapse.
         """
         # === Extract features from encoder ===
         feats_t = self.net_t(imgs)      # Online input features
         feats_k = self.net_t(aug_imgs)  # Target input features
-        
+
         # === Online path: projector → predictor ===
         feats_t_proj = self.proj_layer(feats_t)
-        feats_t_q_grid = self.predictor(feats_t_proj)  # With predictor
-        
+        feats_t_q_grid = self.predictor(feats_t_proj)  # With predictor (for BYOL loss)
+
         # === Target path: projector only (NO predictor - creates asymmetry!) ===
         with torch.no_grad():
             feats_t_k_grid = self.proj_layer_momentum(feats_k)  # No predictor!
-        
+
         # Detach backbone features for other losses
         feats_t_q = [f.detach() for f in feats_t]
         feats_t_k = [f.detach() for f in feats_k]
 
         # === Optional: Add noise for regularization ===
+        # Add noise to projected features BEFORE passing to mff_oce
         if self.training and torch.rand(1) > 0.5:
             for i in range(len(feats_t_proj)):
                 noise = torch.randn_like(feats_t_proj[i]) * 0.1
@@ -385,10 +393,11 @@ class RDLGC_BYOL(nn.Module):
                 feats_t_proj[i] = feats_t_proj[i] + noise * mask
 
         # === Feature fusion and decoding ===
+        # Use projected features (NOT predicted) for reconstruction
         mid = self.mff_oce(feats_t_proj)
         mid_k = self.mff_oce(feats_t_k_grid)
         feats_s = self.net_s(mid)
-        
+
         # === Global features for SCL ===
         glo_feats = F.adaptive_avg_pool2d(mid, 1).squeeze()
         glo_feats_k = F.adaptive_avg_pool2d(mid_k, 1).squeeze()

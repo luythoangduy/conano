@@ -13,7 +13,8 @@ Reference: BYOL (Bootstrap Your Own Latent)
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from loss import LOSS
+# Use relative import to avoid circular dependency
+from . import LOSS
 
 
 @LOSS.register_module

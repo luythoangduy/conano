@@ -62,13 +62,12 @@ class RDLGCBYOLTrainer(BaseTrainer):
         
         # Handle both DDP and non-DDP cases
         net_module = self.net.module if hasattr(self.net, 'module') else self.net
-        
+
         # === Setup optimizers ===
-        # Optimizer for projection layer + predictor
-        proj_params = list(net_module.proj_layer.parameters()) + \
-                      list(net_module.predictor.parameters())
-        self.optim.proj_opt = get_optim(cfg.optim.proj_opt.kwargs, proj_params, lr=cfg.optim.lr)
-        
+        # Create a module list containing proj_layer + predictor for optimizer
+        proj_and_pred = torch.nn.ModuleList([net_module.proj_layer, net_module.predictor])
+        self.optim.proj_opt = get_optim(cfg.optim.proj_opt.kwargs, proj_and_pred, lr=cfg.optim.lr)
+
         # Temporarily remove proj_layer and predictor for distill_opt
         proj_layer = net_module.proj_layer
         predictor = net_module.predictor
@@ -195,68 +194,117 @@ class RDLGCBYOLTrainer(BaseTrainer):
             if os.path.exists(self.tmp_dir):
                 shutil.rmtree(self.tmp_dir)
             os.makedirs(self.tmp_dir, exist_ok=True)
-        
+
         self.reset(isTrain=False)
-        imgs_masks, anomaly_maps, cls_names, anomalys = [], [], [], []
         batch_idx = 0
         test_length = self.cfg.data.test_size
         test_loader = iter(self.test_loader)
-        glb_feats = []
-        labels = []
-        
+
         while batch_idx < test_length:
             t1 = get_timepc()
             batch_idx += 1
             test_data = next(test_loader)
             self.set_input(test_data)
             self.forward()
-            
-            # Compute anomaly maps
-            feats_t = self.feats_t
-            feats_s = self.feats_s
-            
-            anomaly_map_list = []
-            for f_t, f_s in zip(feats_t, feats_s):
-                # Compute feature difference
-                diff = (f_t - f_s) ** 2
-                # Average over channels and upsample
-                diff = diff.mean(dim=1, keepdim=True)
-                diff = F.interpolate(diff, size=self.imgs.shape[-2:], mode='bilinear', align_corners=False)
-                anomaly_map_list.append(diff)
-            
-            # Combine multi-scale anomaly maps
-            anomaly_map = sum(anomaly_map_list) / len(anomaly_map_list)
-            anomaly_map = anomaly_map.squeeze(1)  # (B, H, W)
-            
-            # Collect results
-            for i in range(self.bs):
-                imgs_masks.append(self.imgs_mask[i].cpu().numpy())
-                anomaly_maps.append(anomaly_map[i].cpu().numpy())
-                cls_names.append(self.cls_name[i])
-                anomalys.append(self.anomaly[i])
-            
+
+            # Compute cosine loss for logging
+            loss_cos = self.loss_terms['cos'](self.feats_t, self.feats_s)
+            update_log_term(
+                self.log_terms.get('cos'),
+                reduce_tensor(loss_cos, self.world_size).clone().detach().item(),
+                1, self.master
+            )
+
+            # Compute anomaly map using evaluator
+            anomaly_map, _ = self.evaluator.cal_anomaly_map(
+                self.feats_t, self.feats_s,
+                [self.imgs.shape[2], self.imgs.shape[3]],
+                uni_am=False,
+                amap_mode='add',
+                gaussian_sigma=4
+            )
+
+            # Binarize ground truth mask
+            self.imgs_mask[self.imgs_mask > 0.5] = 1
+            self.imgs_mask[self.imgs_mask <= 0.5] = 0
+
+            # Visualization if enabled
+            if self.cfg.vis:
+                from util.vis import vis_rgb_gt_amp
+                root_out = self.cfg.vis_dir if self.cfg.vis_dir is not None else self.writer.logdir
+                vis_rgb_gt_amp(
+                    self.img_path, self.imgs,
+                    self.imgs_mask.cpu().numpy().astype(int),
+                    anomaly_map,
+                    self.cfg.model.name, root_out,
+                    self.cfg.data.root.split('/')[1]
+                )
+
+            # Save results to disk
+            save_path = os.path.join(self.cfg.logdir, 'results')
+            save_data(
+                save_path, self.cls_name, self.img_path,
+                self.imgs_mask.cpu().numpy().astype(int),
+                anomaly_map,
+                self.anomaly.cpu().numpy().astype(int)
+            )
+
             t2 = get_timepc()
-            
+            print(f'\r{batch_idx}/{test_length}', end='') if self.master else None
+
+            # Logging
             if self.master:
                 if batch_idx % self.cfg.logging.test_log_per == 0 or batch_idx == test_length:
-                    msg = f"Test [{batch_idx}/{test_length}] Time: {t2-t1:.3f}s"
+                    msg = able(
+                        self.progress.get_msg(batch_idx, test_length, 0, 0, prefix=f'Test'),
+                        self.master, None
+                    )
                     log_msg(self.logger, msg)
-        
-        # Compute metrics
+
+        # Compute metrics per class
         if self.master:
-            # Use evaluator to compute AUROC, etc.
-            results = self.evaluator.compute(
-                anomaly_maps=anomaly_maps,
-                gt_masks=imgs_masks,
-                cls_names=cls_names,
-                anomalys=anomalys
-            )
-            
-            for metric_name, value in results.items():
-                log_msg(self.logger, f"{metric_name}: {value:.4f}")
-            
-            return results
-        
+            msg = {}
+            for idx, cls_name in enumerate(self.cls_names):
+                imgs_masks, anomaly_maps, anomalys, cls_names_data = read_data(save_path, cls_name)
+                results = dict(
+                    imgs_masks=imgs_masks,
+                    anomaly_maps=anomaly_maps,
+                    anomalys=anomalys,
+                    cls_names=cls_names_data
+                )
+
+                results = {k: np.array(v) for k, v in results.items()}
+                metric_results = self.evaluator.run(results, cls_name, self.logger)
+
+                msg['Name'] = msg.get('Name', [])
+                msg['Name'].append(cls_name)
+                avg_act = True if len(self.cls_names) > 1 and idx == len(self.cls_names) - 1 else False
+                msg['Name'].append('Avg') if avg_act else None
+
+                for metric in self.metrics:
+                    metric_result = metric_results[metric] * 100
+                    self.metric_recorder[f'{metric}_{cls_name}'].append(metric_result)
+                    max_metric = max(self.metric_recorder[f'{metric}_{cls_name}'])
+                    max_metric_idx = self.metric_recorder[f'{metric}_{cls_name}'].index(max_metric) + 1
+
+                    msg[metric] = msg.get(metric, [])
+                    msg[metric].append(metric_result)
+                    msg[f'{metric} (Max)'] = msg.get(f'{metric} (Max)', [])
+                    msg[f'{metric} (Max)'].append(f'{max_metric:.3f} ({max_metric_idx:<3d} epoch)')
+
+                    if avg_act:
+                        # Compute average across all classes
+                        metric_result_avg = sum(msg[metric]) / len(msg[metric])
+                        self.metric_recorder[f'{metric}_Avg'].append(metric_result_avg)
+                        max_metric = max(self.metric_recorder[f'{metric}_Avg'])
+                        max_metric_idx = self.metric_recorder[f'{metric}_Avg'].index(max_metric) + 1
+                        msg[metric].append(metric_result_avg)
+                        msg[f'{metric} (Max)'].append(f'{max_metric:.3f} ({max_metric_idx:<3d} epoch)')
+
+            # Print table
+            msg = tabulate.tabulate(msg, headers='keys', tablefmt='pipe', floatfmt='.3f', numalign='center', stralign='center')
+            log_msg(self.logger, '\n' + msg)
+
         return None
 
 

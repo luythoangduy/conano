@@ -6,6 +6,9 @@ from trainer import get_trainer
 import warnings
 warnings.filterwarnings("ignore")
 import setproctitle
+import torch
+import numpy as np
+import random
 setproctitle.setproctitle("Duy is training")
 
 def main():
@@ -27,6 +30,14 @@ def main():
 	trainer = get_trainer(cfg)
 	trainer.run()
 
+def setup_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 if __name__ == '__main__':
+	setup_seed(42)
 	main()
