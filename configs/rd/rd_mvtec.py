@@ -18,7 +18,7 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
         self.fvcore_c = 3
         self.seed = 42
         self.size = 256
-        self.epoch_full = 200
+        self.epoch_full = 100
         self.warmup_epochs = 0
         self.test_start_epoch = self.epoch_full
         self.test_per_epoch = self.epoch_full // 10
@@ -81,9 +81,19 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
         self.model_s.kwargs = dict(pretrained=False, checkpoint_path='', strict=False)
         self.model = Namespace()
         self.model.name = 'rd_lgc'
-        self.model.kwargs = dict(pretrained=False, checkpoint_path=checkpoint_path, strict=True, model_t=self.model_t,
-                                 model_s=self.model_s, dp=False,
-                                 momentum=0.99)  # Constant momentum
+        self.model.kwargs = dict(
+            pretrained=False,
+            checkpoint_path=checkpoint_path,
+            strict=True,
+            model_t=self.model_t,
+            model_s=self.model_s,
+            dp=False,
+            # BYOL momentum settings (same as rd_byol)
+            momentum=0.99,
+            momentum_schedule='cosine',  # 'constant', 'cosine', or 'linear'
+            momentum_start=0.9,
+            momentum_end=0.999
+        )
 
         # ==> evaluator
         self.evaluator.kwargs = dict(metrics=self.metrics, pooling_ks=None, max_step_aupro=100,
@@ -99,7 +109,7 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
         # ==> trainer
         self.trainer.name = 'RDLGCTrainer'
         self.trainer.logdir_sub = ''
-        self.trainer.resume_dir = 'RDLGCTrainer_configs_rd_rd_mvtec_20251129-062036'
+        self.trainer.resume_dir = ''
         self.trainer.epoch_full = self.epoch_full
         self.trainer.scheduler_kwargs = dict(
             name='step', lr_noise=None, noise_pct=0.67, noise_std=1.0, noise_seed=42, lr_min=self.lr / 1e2,

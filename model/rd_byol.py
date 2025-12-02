@@ -358,30 +358,37 @@ class RDLGC_BYOL(nn.Module):
                 module.train(mode)
         return self
 
-    def train_forward(self, imgs, aug_imgs):
+    def train_forward(self, imgs, aug_imgs=None):
         """
-        Forward pass during training.
+        Forward pass during training (BYOL-style with momentum).
 
-        Online path: imgs → encoder → projector → predictor → q_grid
-        Target path: aug_imgs → encoder → projector → k_grid (NO predictor!)
+        Architecture:
+        - Online path: imgs → encoder → projector → predictor → q_grid
+        - Target path: imgs → encoder → momentum_projector → k_grid (NO predictor!)
 
-        The asymmetry (predictor only in online) prevents collapse.
+        Key design choices:
+        1. Both paths use SAME image (not augmented views)
+        2. Difference comes from momentum parameters (EMA updated)
+        3. Predictor asymmetry prevents collapse
+        4. aug_imgs parameter kept for compatibility but NOT used
+
+        Why same image for both paths?
+        - Target should represent stable features of the SAME content
+        - Momentum network provides smooth, stable targets
+        - Augmentation diversity handled by data pipeline (if needed)
         """
         # === Extract features from encoder ===
-        feats_t = self.net_t(imgs)      # Online input features
-        feats_k = self.net_t(aug_imgs)  # Target input features
+        feats_t = self.net_t(imgs)  # Online: original image
 
         # === Online path: projector → predictor ===
         feats_t_proj = self.proj_layer(feats_t)
         feats_t_q_grid = self.predictor(feats_t_proj)  # With predictor (for BYOL loss)
 
-        # === Target path: projector only (NO predictor - creates asymmetry!) ===
+        # === Target path: SAME image through momentum network ===
         with torch.no_grad():
-            feats_t_k_grid = self.proj_layer_momentum(feats_k)  # No predictor!
-
-        # Detach backbone features for other losses
-        feats_t_q = [f.detach() for f in feats_t]
-        feats_t_k = [f.detach() for f in feats_k]
+            feats_k = self.net_t(imgs)  # Target: SAME image, same frozen encoder
+            feats_t_k_grid = self.proj_layer_momentum(feats_k)  # Momentum projector (NO predictor!)
+            feats_t_k = [f.clone() for f in feats_k]  # Detach target backbone features
 
         # === Optional: Add noise for regularization ===
         # Add noise to projected features BEFORE passing to mff_oce
@@ -402,7 +409,13 @@ class RDLGC_BYOL(nn.Module):
         glo_feats = F.adaptive_avg_pool2d(mid, 1).squeeze()
         glo_feats_k = F.adaptive_avg_pool2d(mid_k, 1).squeeze()
 
-        return feats_t_q, feats_s, feats_t_k, feats_t_q_grid, feats_t_k_grid, glo_feats, glo_feats_k
+        # Return features WITH gradient for losses (DO NOT detach feats_t!)
+        # feats_t: Online backbone features (has gradient) - for cos loss and dense loss spatial matching
+        # feats_s: Decoder output (has gradient) - for cos loss
+        # feats_t_k: Target backbone features (detached) - for dense loss spatial matching
+        # feats_t_q_grid: Online predictor output (has gradient) - for dense loss
+        # feats_t_k_grid: Target projector output (detached) - for dense loss
+        return feats_t, feats_s, feats_t_k, feats_t_q_grid, feats_t_k_grid, glo_feats, glo_feats_k
 
     def forward(self, imgs, aug_imgs=None):
         """Main forward pass"""
@@ -411,12 +424,12 @@ class RDLGC_BYOL(nn.Module):
 
         # === Inference mode ===
         feats_t = self.net_t(imgs)
-        feats_t = [f.detach() for f in feats_t]
-        feats = self.proj_layer(feats_t)
+        feats_t_detached = [f.detach() for f in feats_t]  # Detach for inference
+        feats = self.proj_layer(feats_t_detached)
         mid = self.mff_oce(feats)
         feats_s = self.net_s(mid)
 
-        return feats_t, feats_s, None, None, None, None, None
+        return feats_t_detached, feats_s, None, None, None, None, None
 
 
 # ============================================================================

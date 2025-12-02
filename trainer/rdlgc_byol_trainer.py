@@ -140,9 +140,9 @@ class RDLGCBYOLTrainer(BaseTrainer):
             
             # === Reconstruction loss (cosine similarity) ===
             loss_cos = self.loss_terms['cos'](self.feats_t, self.feats_s)
-            
-            # === Global contrastive loss (SCL) ===
-            loss_glb = self.loss_terms['scl'](self.glb_feats, self.labels)
+
+            # === Global BYOL loss (unsupervised, no labels needed) ===
+            loss_glb = self.loss_terms['scl'](self.glb_feats, self.glb_feats_k, self.labels)
             
             # === BYOL Dense loss (no negatives!) ===
             # Note: q_grid has predictor output, k_grid doesn't

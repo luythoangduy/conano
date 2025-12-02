@@ -422,23 +422,63 @@ def rd(pretrained=False, **kwargs):
 
 
 class RDLGC(nn.Module):
-    def __init__(self, model_t, model_s, dp=False, momentum=0.99):
+    def __init__(self, model_t, model_s, dp=False, momentum=0.99,
+                 momentum_schedule='constant', momentum_start=0.9, momentum_end=0.999):
         super(RDLGC, self).__init__()
         self.net_t = get_model(model_t)
-        self.mff_oce = MFF_OCE(Bottleneck, 3)
-        self.proj_layer = MultiProjectionLayer(base=64, dp=dp)
 
-        # Momentum encoder for creating stable prototypes (BYOL-style)
+        # === Online Network ===
+        self.proj_layer = MultiProjectionLayer(base=64, dp=dp)
+        self.mff_oce = MFF_OCE(Bottleneck, 3)
+
+        # === Predictor (BYOL-style - creates asymmetry) ===
+        from .rd_byol import MultiPredictorLayer
+        self.predictor = MultiPredictorLayer(base=64)
+
+        # === Target Network (Momentum) ===
         self.proj_layer_momentum = MultiProjectionLayer(base=64, dp=dp)
+        self.mff_oce_momentum = MFF_OCE(Bottleneck, 3)
+
         # Copy weights from online network
         self.proj_layer_momentum.load_state_dict(self.proj_layer.state_dict())
+        self.mff_oce_momentum.load_state_dict(self.mff_oce.state_dict())
+
         # Freeze momentum encoder
         for param in self.proj_layer_momentum.parameters():
+            param.requires_grad = False
+        for param in self.mff_oce_momentum.parameters():
             param.requires_grad = False
 
         self.net_s = get_model(model_s)
         self.frozen_layers = ['net_t']
+
+        # === Momentum settings ===
         self.momentum = momentum
+        self.momentum_schedule = momentum_schedule
+        self.momentum_start = momentum_start
+        self.momentum_end = momentum_end
+        self.current_step = 0
+        self.total_steps = 1
+
+    def set_total_steps(self, total_steps):
+        """Set total training steps for momentum scheduling"""
+        self.total_steps = total_steps
+
+    def get_current_momentum(self):
+        """Get momentum based on schedule"""
+        if self.momentum_schedule == 'constant':
+            return self.momentum
+
+        progress = min(self.current_step / max(self.total_steps, 1), 1.0)
+
+        if self.momentum_schedule == 'cosine':
+            # Cosine annealing from start to end
+            return self.momentum_end - (self.momentum_end - self.momentum_start) * \
+                   (1 + torch.cos(torch.tensor(progress * 3.14159))) / 2
+        elif self.momentum_schedule == 'linear':
+            return self.momentum_start + (self.momentum_end - self.momentum_start) * progress
+        else:
+            return self.momentum
 
     def freeze_layer(self, module):
         module.eval()
@@ -448,8 +488,19 @@ class RDLGC(nn.Module):
     @torch.no_grad()
     def update_momentum_encoder(self):
         """Update momentum encoder using exponential moving average"""
+        m = self.get_current_momentum()
+        if isinstance(m, torch.Tensor):
+            m = m.item()
+
+        # Update proj_layer_momentum
         for param_q, param_k in zip(self.proj_layer.parameters(), self.proj_layer_momentum.parameters()):
-            param_k.data = param_k.data * self.momentum + param_q.data * (1. - self.momentum)
+            param_k.data = param_k.data * m + param_q.data * (1. - m)
+
+        # Update mff_oce_momentum
+        for param_q, param_k in zip(self.mff_oce.parameters(), self.mff_oce_momentum.parameters()):
+            param_k.data = param_k.data * m + param_q.data * (1. - m)
+
+        self.current_step += 1
 
     def train(self, mode=True):
         self.training = mode
@@ -461,31 +512,55 @@ class RDLGC(nn.Module):
         return self
 
     def train_forward(self, imgs, aug_imgs):
-        feats_t = self.net_t(imgs)
-        feats_k = self.net_t(aug_imgs)
-        feats_t_q_grid = self.proj_layer(feats_t)
-        # Use momentum encoder for k_grid to create stable prototypes
+        """
+        Forward pass during training with BYOL-style architecture.
+
+        Online path: imgs → encoder → projector → predictor → mff_oce → decoder
+        Target path: aug_imgs → encoder → projector_momentum → mff_oce_momentum (NO predictor!)
+        """
+        # === Extract features from encoder ===
+        feats_t = self.net_t(imgs)      # Online input features
+        feats_k = self.net_t(aug_imgs)  # Target input features
+
+        # === Online path: projector → predictor ===
+        feats_t_proj = self.proj_layer(feats_t)
+        feats_t_q_grid = self.predictor(feats_t_proj)  # With predictor (for BYOL loss)
+
+        # === Target path: projector_momentum only (NO predictor - creates asymmetry!) ===
         with torch.no_grad():
-            feats_t_k_grid = self.proj_layer_momentum(feats_k)
+            feats_t_k_grid = self.proj_layer_momentum(feats_k)  # No predictor!
+            feats_t_k = [f.clone() for f in feats_k]  # Detach target backbone features
 
-        feats_t_q = [f.detach() for f in feats_t]
-        feats_t_k = [f.detach() for f in feats_k]
+        # === Optional: Add noise for regularization ===
+        if self.training and torch.rand(1) > 0.5:
+            for i in range(len(feats_t_proj)):
+                noise = torch.randn_like(feats_t_proj[i]) * 0.1
+                B, C, H, W = feats_t_proj[i].shape
+                mask = torch.randint(0, 2, (B, 1, H, W), device=imgs.device).float()
+                feats_t_proj[i] = feats_t_proj[i] + noise * mask
 
-        add_noise = torch.randn(1)
-        if add_noise > 0.5 and self.training:
-            for i in range(len(feats_t_q)):
-                noise = torch.randn_like(feats_t_q[i]).to(imgs.device)
-                B, C, H, W = feats_t_q[i].shape
-                mask = torch.randint(0, 2, (B, 1, H, W)).to(imgs.device)
-                feats_t_q_grid[i] += noise * mask
+        # === Feature fusion ===
+        # Online path: use online mff_oce
+        mid = self.mff_oce(feats_t_proj)  # Use projected features (NOT predicted)
 
-        mid = self.mff_oce(feats_t_q_grid)
-        mid_k = self.mff_oce(feats_t_k_grid)
+        # Target path: use momentum mff_oce
+        with torch.no_grad():
+            mid_k = self.mff_oce_momentum(feats_t_k_grid)
+
+        # === Decoder (only online path) ===
         feats_s = self.net_s(mid)
+
+        # === Global features for SCL ===
         glo_feats = F.adaptive_avg_pool2d(mid, 1).squeeze()
         glo_feats_k = F.adaptive_avg_pool2d(mid_k, 1).squeeze()
 
-        return feats_t_q, feats_s, feats_t_k, feats_t_q_grid, feats_t_k_grid, glo_feats, glo_feats_k
+        # Return features WITH gradient for losses (DO NOT detach feats_t!)
+        # feats_t: Online backbone features (has gradient) - for cos loss and dense loss spatial matching
+        # feats_s: Decoder output (has gradient) - for cos loss
+        # feats_t_k: Target backbone features (detached) - for dense loss spatial matching
+        # feats_t_q_grid: Online predictor output (has gradient) - for dense loss
+        # feats_t_k_grid: Target projector output (detached) - for dense loss
+        return feats_t, feats_s, feats_t_k, feats_t_q_grid, feats_t_k_grid, glo_feats, glo_feats_k
 
     def forward(self, imgs, aug_imgs=None):
         if self.training:

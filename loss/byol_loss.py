@@ -133,8 +133,8 @@ class BYOLDenseLoss(nn.Module):
         
         total_loss = 0.0
         
-        for q, k, qb, kb in zip(q_grid, k_grid, q_b, k_b):
-            loss = self.byol_dense_loss(q, k, qb, kb)
+        for qg, kg, qb, kb in zip(q_grid, k_grid, q_b, k_b):
+            loss = self.byol_dense_loss(qg, kg, qb, kb)
             total_loss += loss
         
         return total_loss / len(q_grid) * self.lam
@@ -223,48 +223,89 @@ class ClassAwareBYOLDenseLoss(nn.Module):
         
         total_loss = 0.0
         
-        for q, k, qb, kb in zip(q_grid, k_grid, q_b, k_b):
-            loss = self.class_aware_byol_loss(q, k, qb, kb, labels)
+        for qg, kg, qb, kb in zip(q_grid, k_grid, q_b, k_b):
+            loss = self.class_aware_byol_loss(qg, kg, qb, kb, labels)
             total_loss += loss
         
         return total_loss / len(q_grid) * self.lam
 
 
 @LOSS.register_module
+class BYOLGlobalLoss(nn.Module):
+    """
+    BYOL-style global loss for class-level features.
+
+    This replaces Supervised Contrastive Loss (SCL) with unsupervised BYOL.
+    No class labels needed - just maximize agreement between online and momentum networks.
+
+    Loss = 2 - 2 * cosine_similarity(online_global, stop_gradient(target_global))
+
+    Args:
+        lam: Loss weight multiplier
+    """
+
+    def __init__(self, lam=1.0):
+        super(BYOLGlobalLoss, self).__init__()
+        self.lam = lam
+
+    def forward(self, glo_feats, glo_feats_k, labels=None):
+        """
+        Compute BYOL loss on global features.
+
+        Args:
+            glo_feats: Online global features (B, C) - from online network
+            glo_feats_k: Target global features (B, C) - from momentum network, detached
+            labels: Class labels (optional, for compatibility but NOT used in BYOL)
+
+        Returns:
+            loss: BYOL global loss
+        """
+        # Normalize features
+        glo_feats = F.normalize(glo_feats, dim=1, p=2)
+        glo_feats_k = F.normalize(glo_feats_k, dim=1, p=2)
+
+        # BYOL loss: 2 - 2 * cos_sim
+        # Negative cosine similarity, averaged over batch
+        loss = 2 - 2 * (glo_feats * glo_feats_k).sum(dim=1).mean()
+
+        return loss * self.lam
+
+
+@LOSS.register_module
 class SymmetricBYOLDenseLoss(nn.Module):
     """
     Symmetric BYOL dense loss (both directions).
-    
+
     Loss = BYOL(online, target) + BYOL(target_pred, online)
-    
+
     This can sometimes provide more stable training.
-    
+
     Note: Requires predictor on both online and target paths,
     which is a variation from standard BYOL.
-    
+
     Args:
         lam: Loss weight multiplier
         use_spatial_matching: Whether to use spatial correspondence matching
     """
-    
+
     def __init__(self, lam=1.0, use_spatial_matching=True):
         super(SymmetricBYOLDenseLoss, self).__init__()
         self.lam = lam
         self.use_spatial_matching = use_spatial_matching
         self.byol_loss_fn = BYOLDenseLoss(lam=1.0, use_spatial_matching=use_spatial_matching)
-    
+
     def forward(self, q_b, k_b, q_grid, k_grid, labels=None):
         """
         Symmetric forward pass.
         """
         # Forward direction: online → target
         loss_forward = self.byol_loss_fn(q_b, k_b, q_grid, k_grid, labels)
-        
+
         # Backward direction: target → online (swap roles)
         # Note: In standard BYOL, target doesn't have predictor
         # This is a symmetric variation
         loss_backward = self.byol_loss_fn(k_b, q_b, k_grid, q_grid, labels)
-        
+
         return (loss_forward + loss_backward) / 2 * self.lam
 
 

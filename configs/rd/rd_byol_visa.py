@@ -8,9 +8,9 @@ from configs.__base__ import *
 
 class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
     """
-    Config for RDLGC with BYOL-style architecture on MVTec dataset.
+    Config for RDLGC with BYOL-style architecture on VisA dataset.
 
-    Key differences from original rd_mvtec.py:
+    Key differences from original rd_visa.py:
     1. model.name = 'rd_lgc_byol' (uses BYOL architecture)
     2. trainer.name = 'RDLGCBYOLTrainer' (updates momentum encoder)
     3. loss: BYOLDenseLoss instead of DenseLoss (no negative samples)
@@ -32,7 +32,7 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
         self.test_per_epoch = self.epoch_full // 10
         self.batch_train = 16  # official 16
         self.batch_test_per = 16
-        self.lr = 0.005 * self.batch_train / 16
+        self.lr = 0.001 * self.batch_train / 16
         self.weight_decay = 0.05
         self.metrics = [
             'mAUROC_sp_max',
@@ -44,10 +44,9 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
         self.lambda_2 = 1
         self.vis = False
 
-
-        # ==> data
+        # ==> data (VisA dataset)
         self.data.type = 'DefaultAD'
-        self.data.root = 'data/mvtec'
+        self.data.root = 'data/visa'  # VisA dataset path
         self.data.anomaly_source_path = ''
         self.data.meta = 'meta.json'
         self.data.resize_shape = [self.size, self.size]
@@ -102,8 +101,8 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
             dp=False,
             # BYOL momentum settings
             momentum=0.99,  # Final momentum value
-            momentum_schedule='consine',  # 'constant', 'cosine', or 'linear'
-            momentum_start=0.99,  # Starting momentum (for scheduled updates)
+            momentum_schedule='cosine',  # 'constant', 'cosine', or 'linear'
+            momentum_start=0.9,  # Starting momentum (for scheduled updates)
             momentum_end=0.999   # Ending momentum (for scheduled updates)
         )
 
@@ -123,31 +122,8 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
         self.trainer.logdir_sub = ''
         self.trainer.resume_dir = ''  # Set this if resuming training
         self.trainer.epoch_full = self.epoch_full
-        # OPTION 1: Cosine schedule (smooth decay from epoch 0-100)
-        # Uncomment to use:
-        # self.trainer.scheduler_kwargs = dict(
-        #     name='cosine',
-        #     lr_noise=None,
-        #     noise_pct=0.67,
-        #     noise_std=1.0,
-        #     noise_seed=42,
-        #     lr_min=self.lr / 1e3,          # Lower final LR
-        #     warmup_lr=self.lr / 1e3,
-        #     warmup_iters=-1,
-        #     cooldown_iters=0,
-        #     warmup_epochs=self.warmup_epochs,
-        #     cooldown_epochs=0,
-        #     use_iters=True,
-        #     patience_iters=0,
-        #     patience_epochs=0,
-        #     decay_iters=0,
-        #     decay_epochs=0,
-        #     cycle_decay=0.5,
-        #     lr_cycle_mul=1.0,
-        #     lr_cycle_limit=1
-        # )
 
-        # OPTION 2: Step decay at epoch 50 (earlier than original 80)
+        # Step decay schedule (same as original rd_visa.py)
         self.trainer.scheduler_kwargs = dict(
             name='step',
             lr_noise=None,
@@ -164,10 +140,11 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
             patience_iters=0,
             patience_epochs=0,
             decay_iters=0,
-            decay_epochs=int(self.epoch_full * 0.8),  
+            decay_epochs=int(self.epoch_full * 0.8),  # Decay at epoch 80
             cycle_decay=0.1,
-            decay_rate=0.1  \
+            decay_rate=0.1
         )
+
         self.trainer.mixup_kwargs = dict(mixup_alpha=0.8, cutmix_alpha=1.0, cutmix_minmax=None, prob=0.0,
                                          switch_prob=0.5, mode='batch', correct_lam=True, label_smoothing=0.1)
         self.trainer.test_start_epoch = self.test_start_epoch
@@ -184,9 +161,6 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
             # Global BYOL: class-level features (unsupervised, no labels needed)
             dict(type='BYOLGlobalLoss', name='scl', lam=1.0),
         ]
-
-        # Note: ClassAwareBYOLDenseLoss doesn't work well with small batch_size
-        # because many classes have only 1 sample, causing spatial matching to fail
 
         # ==> logging
         self.logging.log_terms_train = [

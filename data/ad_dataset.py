@@ -190,7 +190,7 @@ class DefaultAD(data.Dataset):
         for cls_name in self.cls_names:
             if self.train and name in ['visa', 'VisA']:
                 data_list = meta_info[cls_name]
-                n = max(1, int(len(data_list) * 0.01))
+                n = max(1, int(len(data_list) * 1.0))  # Changed from 0.01 to 1.0 (100% data)
                 sampled = random.sample(data_list, n)
                 self.data_all.extend(sampled)
             else:
