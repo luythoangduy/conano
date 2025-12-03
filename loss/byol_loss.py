@@ -271,6 +271,190 @@ class BYOLGlobalLoss(nn.Module):
         return loss * self.lam
 
 
+def generate_orthonormal_vectors(n, dim):
+    """
+    Generate n orthonormal vectors of dimension dim using SVD.
+    Same as PAPN implementation.
+
+    Args:
+        n: Number of prototypes (e.g., 5)
+        dim: Dimension of each prototype (e.g., 2048)
+
+    Returns:
+        Tensor of shape (n, dim) with orthonormal rows
+    """
+    A = torch.randn(dim, n)
+    U, S, Vt = torch.svd(A)
+    return U[:, :n].T  # (n, dim)
+
+
+@LOSS.register_module
+class BYOLGlobalLossWithPrototype(nn.Module):
+    """
+    BYOL-style global loss enhanced with PAPN-style prototype learning.
+
+    Flow:
+    1. Online features query prototypes → cosine similarity
+    2. Multiply cosine sim with features → concat with original features
+    3. Pass through projector → compute InfoNCE loss
+    4. Same for target features
+    5. Final loss = original BYOL loss + InfoNCE loss
+
+    Prototypes are initialized as 5 orthogonal vectors.
+
+    Args:
+        lam: Loss weight for original BYOL loss
+        lam_proto: Loss weight for prototype InfoNCE loss
+        n_prototypes: Number of prototypes (default: 5)
+        feat_dim: Feature dimension (will be auto-detected from input)
+        temperature: Temperature for InfoNCE loss
+    """
+
+    def __init__(self, lam=1.0, lam_proto=1.0, n_prototypes=5, feat_dim=None, temperature=0.07):
+        super(BYOLGlobalLossWithPrototype, self).__init__()
+        self.lam = lam
+        self.lam_proto = lam_proto
+        self.n_prototypes = n_prototypes
+        self.temperature = temperature
+        self.feat_dim = feat_dim
+
+        # Prototypes will be initialized on first forward pass
+        self.prototypes = None
+        self.projector = None
+
+    def _initialize_prototypes(self, feat_dim, device):
+        """Initialize prototypes as orthonormal vectors"""
+        if self.prototypes is None:
+            self.prototypes = nn.Parameter(
+                generate_orthonormal_vectors(self.n_prototypes, feat_dim).to(device)
+            )
+            self.feat_dim = feat_dim
+
+    def _initialize_projector(self, input_dim, device):
+        """
+        Initialize projector for proto-enhanced features.
+        Input: concat(features, cosine_sim * features) has dim = feat_dim + feat_dim = 2 * feat_dim
+        Output: same as feat_dim for consistency
+        """
+        if self.projector is None:
+            self.projector = nn.Sequential(
+                nn.Linear(input_dim, input_dim // 2),
+                nn.BatchNorm1d(input_dim // 2),
+                nn.ReLU(inplace=True),
+                nn.Linear(input_dim // 2, self.feat_dim),
+            ).to(device)
+
+    def query_prototypes(self, features):
+        """
+        Query prototypes with features and create enhanced features.
+
+        Args:
+            features: (B, C) global features
+
+        Returns:
+            enhanced_features: (B, 2*C) concatenated features
+        """
+        # Normalize features and prototypes
+        features_norm = F.normalize(features, dim=1, p=2)  # (B, C)
+        prototypes_norm = F.normalize(self.prototypes, dim=1, p=2)  # (n_proto, C)
+
+        # Compute cosine similarity with all prototypes
+        cosine_sim = torch.matmul(features_norm, prototypes_norm.T)  # (B, n_proto)
+
+        # Average cosine similarities across all prototypes to get a scalar weight per sample
+        # Then expand to match feature dimension
+        avg_cosine_sim = cosine_sim.mean(dim=1, keepdim=True)  # (B, 1)
+
+        # Multiply original features with average cosine similarity
+        weighted_features = features * avg_cosine_sim  # (B, C)
+
+        # Concatenate: [original_features, weighted_features]
+        enhanced_features = torch.cat([features, weighted_features], dim=1)  # (B, 2*C)
+
+        return enhanced_features
+
+    def info_nce_loss(self, q, k):
+        """
+        InfoNCE loss for prototype-enhanced features.
+
+        Args:
+            q: Online features after projector (B, C)
+            k: Target features after projector (B, C) - detached
+
+        Returns:
+            loss: InfoNCE loss value
+        """
+        # Normalize
+        q = F.normalize(q, dim=1, p=2)
+        k = F.normalize(k, dim=1, p=2)
+
+        # Positive pairs: each sample with itself
+        l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1)  # (B, 1)
+
+        # Negative pairs: each sample with all other samples in the batch
+        l_neg = torch.einsum('nc,mc->nm', [q, k])  # (B, B)
+
+        # Concatenate positive and negative logits
+        logits = torch.cat([l_pos, l_neg], dim=1)  # (B, 1+B)
+        logits /= self.temperature
+
+        # Labels: positive pair is at index 0
+        labels = torch.zeros(logits.shape[0], dtype=torch.long, device=q.device)
+
+        # Cross entropy loss
+        loss = F.cross_entropy(logits, labels)
+
+        return loss
+
+    def forward(self, glo_feats, glo_feats_k, labels=None):
+        """
+        Compute combined BYOL + Prototype loss.
+
+        Args:
+            glo_feats: Online global features (B, C)
+            glo_feats_k: Target global features (B, C) - detached
+            labels: Class labels (optional, not used)
+
+        Returns:
+            total_loss: BYOL loss + InfoNCE loss
+        """
+        B, C = glo_feats.shape
+        device = glo_feats.device
+
+        # Initialize prototypes and projector on first forward pass
+        if self.prototypes is None:
+            self._initialize_prototypes(C, device)
+        if self.projector is None:
+            self._initialize_projector(C * 2, device)  # Input is 2*C after concat
+
+        # === Original BYOL loss ===
+        glo_feats_norm = F.normalize(glo_feats, dim=1, p=2)
+        glo_feats_k_norm = F.normalize(glo_feats_k, dim=1, p=2)
+        byol_loss = 2 - 2 * (glo_feats_norm * glo_feats_k_norm).sum(dim=1).mean()
+
+        # === Prototype-enhanced InfoNCE loss ===
+        # 1. Query prototypes for online features
+        enhanced_q = self.query_prototypes(glo_feats)  # (B, 2*C)
+
+        # 2. Query prototypes for target features (detached)
+        with torch.no_grad():
+            enhanced_k = self.query_prototypes(glo_feats_k)  # (B, 2*C)
+
+        # 3. Pass through projector
+        proj_q = self.projector(enhanced_q)  # (B, C)
+
+        with torch.no_grad():
+            proj_k = self.projector(enhanced_k)  # (B, C)
+
+        # 4. Compute InfoNCE loss
+        info_nce = self.info_nce_loss(proj_q, proj_k)
+
+        # === Combine losses ===
+        total_loss = self.lam * byol_loss + self.lam_proto * info_nce
+
+        return total_loss
+
+
 @LOSS.register_module
 class SymmetricBYOLDenseLoss(nn.Module):
     """
@@ -392,3 +576,64 @@ if __name__ == '__main__':
     # Test backward
     loss_multi.backward()
     print("\n✅ All BYOL loss tests passed!")
+
+    # ========================================================================
+    # Test BYOLGlobalLossWithPrototype
+    # ========================================================================
+    print("\n" + "="*70)
+    print("Testing BYOLGlobalLossWithPrototype")
+    print("="*70)
+
+    # Test global features
+    B, C = 8, 2048
+    glo_feats = torch.randn(B, C).cuda()
+    glo_feats_k = torch.randn(B, C).cuda()
+    labels = torch.tensor([0, 0, 1, 1, 2, 2, 3, 3]).cuda()
+
+    # Test with default parameters (5 prototypes)
+    print("\nTest 1: Default parameters (5 prototypes)")
+    loss_fn_proto = BYOLGlobalLossWithPrototype(lam=1.0, lam_proto=1.0, n_prototypes=5, temperature=0.07).cuda()
+    loss_proto = loss_fn_proto(glo_feats, glo_feats_k, labels)
+    print(f"  Loss value: {loss_proto.item():.4f}")
+    print(f"  Prototypes shape: {loss_fn_proto.prototypes.shape}")
+    print(f"  Projector input dim: {loss_fn_proto.projector[0].in_features}")
+    print(f"  Projector output dim: {loss_fn_proto.projector[-1].out_features}")
+
+    # Verify prototypes are orthonormal
+    proto_gram = torch.matmul(
+        F.normalize(loss_fn_proto.prototypes, dim=1, p=2),
+        F.normalize(loss_fn_proto.prototypes, dim=1, p=2).T
+    )
+    print(f"  Prototype orthogonality check (should be close to identity):")
+    print(f"    Diagonal mean: {proto_gram.diag().mean().item():.4f} (should be ~1.0)")
+    print(f"    Off-diagonal mean: {(proto_gram.sum() - proto_gram.diag().sum()).item() / (25 - 5):.4f} (should be ~0.0)")
+
+    # Test backward pass
+    print("\nTest 2: Backward pass")
+    loss_proto.backward()
+    print(f"  ✓ Backward pass successful")
+    print(f"  ✓ Prototypes have gradients: {loss_fn_proto.prototypes.grad is not None}")
+    print(f"  ✓ Projector has gradients: {loss_fn_proto.projector[0].weight.grad is not None}")
+
+    # Test with different number of prototypes
+    print("\nTest 3: Different number of prototypes")
+    for n_proto in [3, 7, 10]:
+        loss_fn_test = BYOLGlobalLossWithPrototype(n_prototypes=n_proto).cuda()
+        loss_test = loss_fn_test(glo_feats, glo_feats_k, labels)
+        print(f"  n_prototypes={n_proto}: loss={loss_test.item():.4f}, proto_shape={loss_fn_test.prototypes.shape}")
+
+    # Test with different loss weights
+    print("\nTest 4: Different loss weights")
+    loss_fn_w1 = BYOLGlobalLossWithPrototype(lam=1.0, lam_proto=0.0).cuda()
+    loss_w1 = loss_fn_w1(glo_feats, glo_feats_k, labels)
+    print(f"  lam=1.0, lam_proto=0.0: {loss_w1.item():.4f} (only BYOL loss)")
+
+    loss_fn_w2 = BYOLGlobalLossWithPrototype(lam=0.0, lam_proto=1.0).cuda()
+    loss_w2 = loss_fn_w2(glo_feats, glo_feats_k, labels)
+    print(f"  lam=0.0, lam_proto=1.0: {loss_w2.item():.4f} (only InfoNCE loss)")
+
+    loss_fn_w3 = BYOLGlobalLossWithPrototype(lam=0.5, lam_proto=0.5).cuda()
+    loss_w3 = loss_fn_w3(glo_feats, glo_feats_k, labels)
+    print(f"  lam=0.5, lam_proto=0.5: {loss_w3.item():.4f} (balanced)")
+
+    print("\n✅ BYOLGlobalLossWithPrototype tests passed!")
