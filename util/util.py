@@ -165,6 +165,9 @@ def log_msg(logger, msg, level='info'):
     if logger is not None:
         if msg is not None and level == 'info':
             logger.info(msg)
+            # Flush handlers to ensure log is written immediately
+            for handler in logger.handlers:
+                handler.flush()
 
 
 class AvgMeter(object):

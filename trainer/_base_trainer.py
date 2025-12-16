@@ -5,7 +5,7 @@ import shutil
 import datetime
 import tabulate
 import torch
-from util.util import makedirs, log_cfg, able, log_msg, get_log_terms, update_log_term
+from util.util import makedirs, log_cfg, able, log_msg, get_log_terms, update_log_term, start_show
 from util.net import trans_state_dict, print_networks, get_timepc, reduce_tensor
 from util.net import get_loss_scaler, get_autocast, distribute_bn
 from optim.scheduler import get_scheduler
@@ -37,6 +37,7 @@ class BaseTrainer():
         self.cfg = cfg
         self.master, self.logger, self.writer = cfg.master, cfg.logger, cfg.writer
         self.local_rank, self.rank, self.world_size = cfg.local_rank, cfg.rank, cfg.world_size
+        start_show(self.logger)
         log_msg(self.logger, '==> Running Trainer: {}'.format(cfg.trainer.name))
         # =========> model <=================================
         log_msg(self.logger, '==> Using GPU: {} for Training'.format(list(range(cfg.world_size))))
@@ -169,6 +170,7 @@ class BaseTrainer():
         self.train_loader.sampler.set_epoch(int(self.epoch)) if self.cfg.dist else None
         train_length = self.cfg.data.train_size
         train_loader = iter(self.train_loader)
+        log_msg(self.logger, f'==> Training loop started: epoch_full={self.epoch_full}, iter_full={self.iter_full}')
         while self.epoch < self.epoch_full and self.iter < self.iter_full:
             self.scheduler_step(self.iter)
             # ---------- data ----------

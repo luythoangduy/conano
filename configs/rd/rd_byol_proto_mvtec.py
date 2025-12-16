@@ -251,8 +251,9 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
         # To enable wandb logging, set wandb.enabled = True and provide your API key
         # You can also override these via command line:
         #   python run.py wandb.enabled=True wandb.api_key=YOUR_KEY
-        self.wandb.enabled = False  # Set to True to enable
-        self.wandb.api_key = None  # Set your wandb API key here or via environment variable
+        import os
+        self.wandb.enabled = True  # Set to True to enable
+        self.wandb.api_key = os.environ.get('WANDB_API_KEY', None)  # Get from environment variable
         self.wandb.project = 'rdlgc-byol-prototype'
         self.wandb.entity = None  # Optional: your wandb team/entity
         self.wandb.name = None  # Auto-generated if None

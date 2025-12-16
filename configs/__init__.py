@@ -30,8 +30,10 @@ def get_cfg(opt_terminal):
 			v = v
 		for i, k in enumerate(ks):
 			if i == len(ks) - 1:
-				if isinstance(cfg_ghost, dict):
-					cfg_ghost[k] = v
+				if isinstance(cfg_ghost, (dict, list)):
+					# Handle dict and list indexing
+					idx = int(k) if isinstance(cfg_ghost, list) else k
+					cfg_ghost[idx] = v
 				else:
 					cfg_ghost.__setattr__(k, v)
 			else:
@@ -39,6 +41,10 @@ def get_cfg(opt_terminal):
 					if k not in cfg_ghost:
 						cfg_ghost[k] = Namespace()
 					cfg_ghost = cfg_ghost[k]
+				elif isinstance(cfg_ghost, list):
+					# Handle list indexing for intermediate keys
+					idx = int(k)
+					cfg_ghost = cfg_ghost[idx]
 				else:
 					if not hasattr(cfg_ghost, k):
 						cfg_ghost.__setattr__(k, Namespace())
