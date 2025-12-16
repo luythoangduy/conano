@@ -129,7 +129,17 @@ class DefaultAD(data.Dataset):
         self.loader_target = get_img_loader(cfg.data.loader_type_target)
 
         self.data_all = []
-        name = self.root.split('/')[-1]
+        name = self.root.rstrip('/').split('/')[-1]
+        # Handle dataset name variations (e.g., 'mvtec_anomaly_detection' -> 'mvtec')
+        if 'mvtec' in name.lower() and '3d' not in name.lower() and 'loco' not in name.lower():
+            name = 'mvtec'
+        elif 'mvtec3d' in name.lower() or 'mvtec_3d' in name.lower():
+            name = 'mvtec3d'
+        elif 'mvtec_loco' in name.lower():
+            name = 'mvtec_loco'
+        elif 'visa' in name.lower():
+            name = 'visa'
+
         if name in ['mvtec', 'coco', 'visa', 'medical', 'btad', 'mpdd', 'mad_sim', 'mad_real',
                     'MVTec_AD', 'Uni_medical', 'VisA', 'BTech_Dataset_Transformed']:
             meta_info = json.load(open(f'{self.root}/{cfg.data.meta}', 'r'))
@@ -186,6 +196,18 @@ class DefaultAD(data.Dataset):
                         )
                     data_cls_all.append(info_img)
                 meta_info[cls_name] = data_cls_all
+        else:
+            # Fallback: try to load meta.json as default format
+            try:
+                meta_info = json.load(open(f'{self.root}/{cfg.data.meta}', 'r'))
+                meta_info = meta_info['train' if self.train else 'test']
+                self.cls_names = cfg.data.cls_names
+                if not isinstance(self.cls_names, list):
+                    self.cls_names = [self.cls_names]
+                self.cls_names = list(meta_info.keys()) if len(self.cls_names) == 0 else self.cls_names
+            except Exception as e:
+                raise ValueError(f"Unknown dataset name '{name}' from root path '{self.root}'. "
+                               f"Cannot determine dataset type. Error: {e}")
 
         for cls_name in self.cls_names:
             if self.train and name in ['visa', 'VisA']:
