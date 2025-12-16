@@ -47,6 +47,9 @@ def get_cfg(opt_terminal):
 	# Override data.root if data_path is provided
 	if hasattr(cfg, 'data_path') and cfg.data_path is not None:
 		if hasattr(cfg, 'data') and hasattr(cfg.data, 'root'):
+			# Save original root for meta.json path
+			if not hasattr(cfg.data, 'meta_root'):
+				cfg.data.meta_root = cfg.data.root
 			cfg.data.root = cfg.data_path
 
 	cfg.task_start_time = get_timepc()

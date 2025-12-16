@@ -140,16 +140,19 @@ class DefaultAD(data.Dataset):
         elif 'visa' in name.lower():
             name = 'visa'
 
+        # Determine meta file location (use meta_root if available, otherwise use root)
+        meta_root = getattr(cfg.data, 'meta_root', self.root)
+
         if name in ['mvtec', 'coco', 'visa', 'medical', 'btad', 'mpdd', 'mad_sim', 'mad_real',
                     'MVTec_AD', 'Uni_medical', 'VisA', 'BTech_Dataset_Transformed']:
-            meta_info = json.load(open(f'{self.root}/{cfg.data.meta}', 'r'))
+            meta_info = json.load(open(f'{meta_root}/{cfg.data.meta}', 'r'))
             meta_info = meta_info['train' if self.train else 'test']
             self.cls_names = cfg.data.cls_names
             if not isinstance(self.cls_names, list):
                 self.cls_names = [self.cls_names]
             self.cls_names = list(meta_info.keys()) if len(self.cls_names) == 0 else self.cls_names
         elif name in ['mvtec3d', 'mvtec_loco']:
-            meta_info = json.load(open(f'{self.root}/{cfg.data.meta}', 'r'))
+            meta_info = json.load(open(f'{meta_root}/{cfg.data.meta}', 'r'))
             if self.train:
                 meta_info, meta_info_val = meta_info['train'], meta_info['validation']
                 for k in meta_info.keys():
@@ -199,7 +202,7 @@ class DefaultAD(data.Dataset):
         else:
             # Fallback: try to load meta.json as default format
             try:
-                meta_info = json.load(open(f'{self.root}/{cfg.data.meta}', 'r'))
+                meta_info = json.load(open(f'{meta_root}/{cfg.data.meta}', 'r'))
                 meta_info = meta_info['train' if self.train else 'test']
                 self.cls_names = cfg.data.cls_names
                 if not isinstance(self.cls_names, list):
@@ -207,7 +210,7 @@ class DefaultAD(data.Dataset):
                 self.cls_names = list(meta_info.keys()) if len(self.cls_names) == 0 else self.cls_names
             except Exception as e:
                 raise ValueError(f"Unknown dataset name '{name}' from root path '{self.root}'. "
-                               f"Cannot determine dataset type. Error: {e}")
+                               f"Cannot determine dataset type. Meta path: {meta_root}/{cfg.data.meta}. Error: {e}")
 
         for cls_name in self.cls_names:
             if self.train and name in ['visa', 'VisA']:
