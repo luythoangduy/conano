@@ -2,6 +2,7 @@
 data/mvtec/
 data/*/
 !data/*.py
+!data/gen_benchmark/
 !data/README.md
 
 # Logs and checkpoints

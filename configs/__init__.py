@@ -35,9 +35,20 @@ def get_cfg(opt_terminal):
 				else:
 					cfg_ghost.__setattr__(k, v)
 			else:
-				if k not in cfg_ghost:
-					cfg_ghost.__setattr__(k, Namespace())
-				cfg_ghost = cfg_ghost.__dict__[k]
+				if isinstance(cfg_ghost, dict):
+					if k not in cfg_ghost:
+						cfg_ghost[k] = Namespace()
+					cfg_ghost = cfg_ghost[k]
+				else:
+					if not hasattr(cfg_ghost, k):
+						cfg_ghost.__setattr__(k, Namespace())
+					cfg_ghost = getattr(cfg_ghost, k)
+
+	# Override data.root if data_path is provided
+	if hasattr(cfg, 'data_path') and cfg.data_path is not None:
+		if hasattr(cfg, 'data') and hasattr(cfg.data, 'root'):
+			cfg.data.root = cfg.data_path
+
 	cfg.task_start_time = get_timepc()
 	return cfg
 

@@ -31,11 +31,15 @@ print_error() {
 DATASET=${1:-"mvtec"}  # mvtec or visa
 MODE=${2:-"train"}     # train, test, or ablation
 GPU=${3:-"0"}          # GPU ID
+DATA_PATH=${DATA_PATH:-""}  # Optional: set via environment variable or modify here
 
 print_header "RDLGC with Prototype Learning"
 print_info "Dataset: $DATASET"
 print_info "Mode: $MODE"
 print_info "GPU: $GPU"
+if [ -n "$DATA_PATH" ]; then
+    print_info "Data Path: $DATA_PATH"
+fi
 
 ################################################################################
 # Set CUDA device
@@ -50,16 +54,26 @@ export CUDA_VISIBLE_DEVICES=$GPU
 train_mvtec() {
     print_header "Training on MVTec with Prototypes"
     mkdir -p logs
-    python conano/run.py \
+    DATA_PATH_ARG=""
+    if [ -n "$DATA_PATH" ]; then
+        DATA_PATH_ARG="--data_path $DATA_PATH"
+    fi
+    python run.py \
         -c configs/rd/rd_byol_proto_mvtec.py \
+        $DATA_PATH_ARG \
         2>&1 | tee logs/mvtec_proto_$(date +%Y%m%d_%H%M%S).log
 }
 
 train_visa() {
     print_header "Training on VisA with Prototypes"
     mkdir -p logs
-    python conano/run.py \
+    DATA_PATH_ARG=""
+    if [ -n "$DATA_PATH" ]; then
+        DATA_PATH_ARG="--data_path $DATA_PATH"
+    fi
+    python run.py \
         -c configs/rd/rd_byol_proto_visa.py \
+        $DATA_PATH_ARG \
         2>&1 | tee logs/visa_proto_$(date +%Y%m%d_%H%M%S).log
 }
 
@@ -75,9 +89,14 @@ test_mvtec() {
         exit 1
     fi
 
-    python conano/run.py \
+    DATA_PATH_ARG=""
+    if [ -n "$DATA_PATH" ]; then
+        DATA_PATH_ARG="--data_path $DATA_PATH"
+    fi
+    python run.py \
         -c configs/rd/rd_byol_proto_mvtec.py \
         -m test \
+        $DATA_PATH_ARG \
         resume_dir="$CHECKPOINT_DIR"
 }
 
@@ -89,9 +108,14 @@ test_visa() {
         exit 1
     fi
 
-    python conano/run.py \
+    DATA_PATH_ARG=""
+    if [ -n "$DATA_PATH" ]; then
+        DATA_PATH_ARG="--data_path $DATA_PATH"
+    fi
+    python run.py \
         -c configs/rd/rd_byol_proto_visa.py \
         -m test \
+        $DATA_PATH_ARG \
         resume_dir="$CHECKPOINT_DIR"
 }
 
@@ -102,11 +126,16 @@ test_visa() {
 ablation_loss_weights() {
     print_header "Ablation: Loss Weights"
 
+    DATA_PATH_ARG=""
+    if [ -n "$DATA_PATH" ]; then
+        DATA_PATH_ARG="--data_path $DATA_PATH"
+    fi
     mkdir -p logs
     for lam_proto in 0.5 1.0 1.5 2.0; do
         print_info "Testing lam_proto=$lam_proto"
-        python conano/run.py \
+        python run.py \
             -c configs/rd/rd_byol_proto_mvtec.py \
+            $DATA_PATH_ARG \
             loss_terms.scl.lam_proto=$lam_proto \
             trainer.logdir_sub=ablation_lam_${lam_proto} \
             2>&1 | tee logs/ablation_lam_${lam_proto}.log
@@ -116,11 +145,16 @@ ablation_loss_weights() {
 ablation_n_prototypes() {
     print_header "Ablation: Number of Prototypes"
 
+    DATA_PATH_ARG=""
+    if [ -n "$DATA_PATH" ]; then
+        DATA_PATH_ARG="--data_path $DATA_PATH"
+    fi
     mkdir -p logs
     for n_proto in 3 5 7 10; do
         print_info "Testing n_prototypes=$n_proto"
-        python conano/run.py \
+        python run.py \
             -c configs/rd/rd_byol_proto_mvtec.py \
+            $DATA_PATH_ARG \
             loss_terms.scl.n_prototypes=$n_proto \
             trainer.logdir_sub=ablation_proto_${n_proto} \
             2>&1 | tee logs/ablation_proto_${n_proto}.log
@@ -133,7 +167,7 @@ ablation_temperature() {
     mkdir -p logs
     for temp in 0.05 0.07 0.10 0.15; do
         print_info "Testing temperature=$temp"
-        python conano/run.py \
+        python run.py \
             -c configs/rd/rd_byol_proto_mvtec.py \
             loss_terms.scl.temperature=$temp \
             trainer.logdir_sub=ablation_temp_${temp} \
@@ -158,14 +192,14 @@ compare_baseline() {
     mkdir -p logs
     # Train baseline
     print_info "Training baseline (without prototypes)"
-    python conano/run.py \
+    python run.py \
         -c configs/rd/rd_byol_mvtec.py \
         trainer.logdir_sub=baseline \
         2>&1 | tee logs/baseline_$(date +%Y%m%d_%H%M%S).log
 
     # Train with prototypes
     print_info "Training with prototypes"
-    python conano/run.py \
+    python run.py \
         -c configs/rd/rd_byol_proto_mvtec.py \
         trainer.logdir_sub=prototype \
         2>&1 | tee logs/prototype_$(date +%Y%m%d_%H%M%S).log
@@ -185,7 +219,7 @@ train_multi_gpu() {
     python -m torch.distributed.launch \
         --nproc_per_node=$NUM_GPUS \
         --master_port=29500 \
-        conano/run.py \
+        run.py \
         -c $CONFIG \
         2>&1 | tee logs/${DATASET}_multi_gpu_$(date +%Y%m%d_%H%M%S).log
 }

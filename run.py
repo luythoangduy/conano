@@ -17,6 +17,7 @@ def main():
 	# parser.add_argument('-c', '--cfg_path', default='configs/invad_mvtec_debug.py')
 	parser.add_argument('-c', '--cfg_path', default='configs/rd/rd_mvtec.py')
 	parser.add_argument('-m', '--mode', default='train', choices=['train', 'test'])
+	parser.add_argument('--data_path', type=str, default=None, help='Path to dataset root directory')
 	parser.add_argument('--sleep', type=int, default=-1)
 	parser.add_argument('--memory', type=int, default=-1)
 	parser.add_argument('--dist_url', default='env://', type=str, help='url used to set up distributed training')
