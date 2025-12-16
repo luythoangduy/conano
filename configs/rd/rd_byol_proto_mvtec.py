@@ -246,3 +246,16 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
             dict(name='batch_t', fmt=':>5.3f', add_name='avg'),
             dict(name='cos', suffixes=[''], fmt=':>5.3f', add_name='avg'),
         ]
+
+        # ==> wandb (Weights & Biases logging)
+        # To enable wandb logging, set wandb.enabled = True and provide your API key
+        # You can also override these via command line:
+        #   python run.py wandb.enabled=True wandb.api_key=YOUR_KEY
+        self.wandb.enabled = False  # Set to True to enable
+        self.wandb.api_key = None  # Set your wandb API key here or via environment variable
+        self.wandb.project = 'rdlgc-byol-prototype'
+        self.wandb.entity = None  # Optional: your wandb team/entity
+        self.wandb.name = None  # Auto-generated if None
+        self.wandb.tags = ['mvtec', 'byol', 'prototype', 'anomaly-detection']
+        self.wandb.notes = 'RDLGC with BYOL + Prototype Learning on MVTec'
+        self.wandb.log_interval = 1  # Log every N iterations

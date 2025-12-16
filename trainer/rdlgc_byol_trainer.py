@@ -31,6 +31,12 @@ import numpy as np
 from torch.nn.parallel import DistributedDataParallel as NativeDDP
 
 try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+
+try:
     from apex import amp
     from apex.parallel import DistributedDataParallel as ApexDDP
     from apex.parallel import convert_syncbn_model as ApexSyncBN
@@ -59,7 +65,7 @@ class RDLGCBYOLTrainer(BaseTrainer):
     
     def __init__(self, cfg):
         super(RDLGCBYOLTrainer, self).__init__(cfg)
-        
+
         # Handle both DDP and non-DDP cases
         net_module = self.net.module if hasattr(self.net, 'module') else self.net
 
@@ -76,12 +82,43 @@ class RDLGCBYOLTrainer(BaseTrainer):
         self.optim.distill_opt = get_optim(cfg.optim.distill_opt.kwargs, self.net, lr=cfg.optim.lr * 5)
         net_module.proj_layer = proj_layer
         net_module.predictor = predictor
-        
+
         # === Set total steps for momentum scheduling ===
         total_steps = cfg.trainer.iter_full if hasattr(cfg.trainer, 'iter_full') else \
                      cfg.trainer.epoch_full * cfg.data.train_size
         net_module.set_total_steps(total_steps)
-        
+
+        # === Initialize WandB ===
+        self.use_wandb = False
+        if hasattr(cfg, 'wandb') and cfg.wandb.enabled and self.master:
+            if not WANDB_AVAILABLE:
+                log_msg(self.logger, "[WandB] Warning: wandb not installed, logging disabled")
+            else:
+                # Set API key if provided
+                if cfg.wandb.api_key is not None:
+                    import os
+                    os.environ['WANDB_API_KEY'] = cfg.wandb.api_key
+
+                # Initialize wandb
+                run_name = cfg.wandb.name if cfg.wandb.name else f"{cfg.model.name}_{cfg.data.root.split('/')[-1]}"
+                wandb.init(
+                    project=cfg.wandb.project,
+                    entity=cfg.wandb.entity,
+                    name=run_name,
+                    tags=cfg.wandb.tags,
+                    notes=cfg.wandb.notes,
+                    config={
+                        'model': cfg.model.name,
+                        'dataset': cfg.data.root,
+                        'batch_size': cfg.trainer.data.batch_size,
+                        'lr': cfg.optim.lr,
+                        'epochs': cfg.trainer.epoch_full,
+                        'momentum_schedule': net_module.momentum_schedule,
+                    }
+                )
+                self.use_wandb = True
+                log_msg(self.logger, f"[WandB] Initialized: {wandb.run.name}")
+
         # Log BYOL-specific info
         if self.master:
             log_msg(self.logger, f"[BYOL] Total steps: {total_steps}")
@@ -164,22 +201,41 @@ class RDLGCBYOLTrainer(BaseTrainer):
             net_module.update_momentum_encoder()
 
         # === Logging ===
-        update_log_term(
-            self.log_terms.get('cos'), 
-            reduce_tensor(loss_cos, self.world_size).clone().detach().item(), 
-            1, self.master
-        )
-        update_log_term(
-            self.log_terms.get('glb'), 
-            reduce_tensor(loss_glb, self.world_size).clone().detach().item(), 
-            1, self.master
-        )
-        update_log_term(
-            self.log_terms.get('dense'), 
-            reduce_tensor(loss_den, self.world_size).clone().detach().item(),
-            1, self.master
-        )
-        
+        loss_cos_val = reduce_tensor(loss_cos, self.world_size).clone().detach().item()
+        loss_glb_val = reduce_tensor(loss_glb, self.world_size).clone().detach().item()
+        loss_den_val = reduce_tensor(loss_den, self.world_size).clone().detach().item()
+        loss_total_val = reduce_tensor(loss, self.world_size).clone().detach().item()
+
+        update_log_term(self.log_terms.get('cos'), loss_cos_val, 1, self.master)
+        update_log_term(self.log_terms.get('glb'), loss_glb_val, 1, self.master)
+        update_log_term(self.log_terms.get('dense'), loss_den_val, 1, self.master)
+
+        # WandB logging
+        if self.use_wandb and self.iter % self.cfg.wandb.log_interval == 0:
+            log_dict = {
+                'train/loss_total': loss_total_val,
+                'train/loss_cos': loss_cos_val,
+                'train/loss_global': loss_glb_val,
+                'train/loss_dense': loss_den_val,
+                'train/lr': self.optim.proj_opt.param_groups[0]['lr'],
+                'train/epoch': self.epoch,
+                'train/iter': self.iter,
+            }
+
+            # Log momentum
+            current_momentum = net_module.get_current_momentum()
+            if isinstance(current_momentum, torch.Tensor):
+                current_momentum = current_momentum.item()
+            log_dict['train/momentum'] = current_momentum
+
+            # Log individual loss components if using BYOLGlobalLossWithPrototype
+            if hasattr(self.loss_terms['scl'], 'last_byol_loss'):
+                log_dict['train/loss_byol'] = self.loss_terms['scl'].last_byol_loss
+            if hasattr(self.loss_terms['scl'], 'last_proto_loss'):
+                log_dict['train/loss_prototype'] = self.loss_terms['scl'].last_proto_loss
+
+            wandb.log(log_dict, step=self.iter)
+
         # Log momentum value periodically
         if self.iter % 100 == 0 and self.master:
             current_momentum = net_module.get_current_momentum()
@@ -304,6 +360,23 @@ class RDLGCBYOLTrainer(BaseTrainer):
             # Print table
             msg = tabulate.tabulate(msg, headers='keys', tablefmt='pipe', floatfmt='.3f', numalign='center', stralign='center')
             log_msg(self.logger, '\n' + msg)
+
+            # Log metrics to WandB
+            if self.use_wandb:
+                wandb_metrics = {}
+                for metric in self.metrics:
+                    # Log individual class metrics
+                    for cls_name in self.cls_names:
+                        metric_val = self.metric_recorder[f'{metric}_{cls_name}'][-1]
+                        wandb_metrics[f'test/{metric}_{cls_name}'] = metric_val
+
+                    # Log average metric
+                    if f'{metric}_Avg' in self.metric_recorder and len(self.metric_recorder[f'{metric}_Avg']) > 0:
+                        avg_val = self.metric_recorder[f'{metric}_Avg'][-1]
+                        wandb_metrics[f'test/{metric}_avg'] = avg_val
+
+                wandb_metrics['test/epoch'] = self.epoch
+                wandb.log(wandb_metrics, step=self.iter)
 
         return None
 

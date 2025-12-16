@@ -89,3 +89,14 @@ class cfg_common(Namespace):
 		self.logging.train_reset_log_per = 50
 		self.logging.train_log_per = 50
 		self.logging.test_log_per = 50
+
+		# ==> wandb
+		self.wandb = Namespace()
+		self.wandb.enabled = False  # Enable wandb logging
+		self.wandb.api_key = None  # WandB API key (set via env or config)
+		self.wandb.project = 'anomaly-detection'  # WandB project name
+		self.wandb.entity = None  # WandB team/entity name (optional)
+		self.wandb.name = None  # Run name (auto-generated if None)
+		self.wandb.tags = []  # Tags for the run
+		self.wandb.notes = None  # Notes for the run
+		self.wandb.log_interval = 1  # Log every N iterations

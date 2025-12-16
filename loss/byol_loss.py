@@ -452,6 +452,10 @@ class BYOLGlobalLossWithPrototype(nn.Module):
         # === Combine losses ===
         total_loss = self.lam * byol_loss + self.lam_proto * info_nce
 
+        # Store individual losses for logging
+        self.last_byol_loss = (self.lam * byol_loss).item()
+        self.last_proto_loss = (self.lam_proto * info_nce).item()
+
         return total_loss
 
 

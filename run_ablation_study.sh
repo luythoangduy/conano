@@ -36,16 +36,31 @@ print_experiment() {
 DATASET=${1:-"mvtec"}  # mvtec or visa
 GPU=${2:-"0"}          # GPU ID
 MODE=${3:-"all"}       # all, dense, global, prototype, module_combination
+WANDB_ENABLED=${WANDB_ENABLED:-"False"}  # Enable wandb logging
+WANDB_API_KEY=${WANDB_API_KEY:-""}  # WandB API key
+WANDB_PROJECT=${WANDB_PROJECT:-"rdlgc-ablation"}  # WandB project name
 
 print_header "Ablation Study: RDLGC BYOL + Prototype"
 print_info "Dataset: $DATASET"
 print_info "GPU: $GPU"
 print_info "Study Type: $MODE"
+if [ "$WANDB_ENABLED" = "True" ]; then
+    print_info "WandB: Enabled (Project: $WANDB_PROJECT)"
+fi
 
 export CUDA_VISIBLE_DEVICES=$GPU
 mkdir -p logs/ablation
 
 CONFIG="configs/rd/rd_byol_proto_${DATASET}.py"
+
+# Prepare WandB arguments
+WANDB_ARGS=""
+if [ "$WANDB_ENABLED" = "True" ]; then
+    WANDB_ARGS="wandb.enabled=True wandb.project=$WANDB_PROJECT"
+    if [ -n "$WANDB_API_KEY" ]; then
+        WANDB_ARGS="$WANDB_ARGS wandb.api_key=$WANDB_API_KEY"
+    fi
+fi
 
 ################################################################################
 # Module 1: DenseLoss Ablation
@@ -60,6 +75,8 @@ ablation_dense_loss() {
         -c $CONFIG \
         loss.loss_terms.1.lam=0.0 \
         trainer.logdir_sub=ablation/dense_disabled \
+        $WANDB_ARGS \
+        wandb.tags=['ablation','dense_disabled'] \
         2>&1 | tee logs/ablation/dense_disabled.log
 
     # Experiment 2: DenseLoss with different weights
@@ -69,6 +86,9 @@ ablation_dense_loss() {
             -c $CONFIG \
             loss.loss_terms.1.lam=$lam_dense \
             trainer.logdir_sub=ablation/dense_lam_${lam_dense} \
+            $WANDB_ARGS \
+            wandb.tags=['ablation','dense_weight'] \
+            wandb.name=dense_lam_${lam_dense} \
             2>&1 | tee logs/ablation/dense_lam_${lam_dense}.log
     done
 
@@ -78,6 +98,8 @@ ablation_dense_loss() {
         -c $CONFIG \
         loss.loss_terms.1.use_spatial_matching=False \
         trainer.logdir_sub=ablation/dense_no_spatial \
+        $WANDB_ARGS \
+        wandb.tags=['ablation','dense_no_spatial'] \
         2>&1 | tee logs/ablation/dense_no_spatial.log
 }
 

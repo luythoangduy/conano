@@ -32,6 +32,9 @@ DATASET=${1:-"mvtec"}  # mvtec or visa
 MODE=${2:-"train"}     # train, test, or ablation
 GPU=${3:-"0"}          # GPU ID
 DATA_PATH=${DATA_PATH:-""}  # Optional: set via environment variable or modify here
+WANDB_ENABLED=${WANDB_ENABLED:-"False"}  # Enable wandb logging
+WANDB_API_KEY=${WANDB_API_KEY:-""}  # WandB API key
+WANDB_PROJECT=${WANDB_PROJECT:-"rdlgc-prototype"}  # WandB project name
 
 print_header "RDLGC with Prototype Learning"
 print_info "Dataset: $DATASET"
@@ -39,6 +42,9 @@ print_info "Mode: $MODE"
 print_info "GPU: $GPU"
 if [ -n "$DATA_PATH" ]; then
     print_info "Data Path: $DATA_PATH"
+fi
+if [ "$WANDB_ENABLED" = "True" ]; then
+    print_info "WandB: Enabled (Project: $WANDB_PROJECT)"
 fi
 
 ################################################################################
@@ -58,9 +64,17 @@ train_mvtec() {
     if [ -n "$DATA_PATH" ]; then
         DATA_PATH_ARG="--data_path $DATA_PATH"
     fi
+    WANDB_ARGS=""
+    if [ "$WANDB_ENABLED" = "True" ]; then
+        WANDB_ARGS="wandb.enabled=True wandb.project=$WANDB_PROJECT"
+        if [ -n "$WANDB_API_KEY" ]; then
+            WANDB_ARGS="$WANDB_ARGS wandb.api_key=$WANDB_API_KEY"
+        fi
+    fi
     python run.py \
         -c configs/rd/rd_byol_proto_mvtec.py \
         $DATA_PATH_ARG \
+        $WANDB_ARGS \
         2>&1 | tee logs/mvtec_proto_$(date +%Y%m%d_%H%M%S).log
 }
 
@@ -71,9 +85,17 @@ train_visa() {
     if [ -n "$DATA_PATH" ]; then
         DATA_PATH_ARG="--data_path $DATA_PATH"
     fi
+    WANDB_ARGS=""
+    if [ "$WANDB_ENABLED" = "True" ]; then
+        WANDB_ARGS="wandb.enabled=True wandb.project=$WANDB_PROJECT"
+        if [ -n "$WANDB_API_KEY" ]; then
+            WANDB_ARGS="$WANDB_ARGS wandb.api_key=$WANDB_API_KEY"
+        fi
+    fi
     python run.py \
         -c configs/rd/rd_byol_proto_visa.py \
         $DATA_PATH_ARG \
+        $WANDB_ARGS \
         2>&1 | tee logs/visa_proto_$(date +%Y%m%d_%H%M%S).log
 }
 
