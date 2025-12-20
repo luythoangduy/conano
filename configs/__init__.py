@@ -22,7 +22,7 @@ def get_cfg(opt_terminal):
 	cfg.command = f'python3 -m torch.distributed.launch --nproc_per_node=$nproc_per_node --nnodes=$nnodes --node_rank=$node_rank --master_addr=$master_addr --master_port=$master_port --use_env run.py -c {cfg.cfg_path} -m {cfg.mode} --sleep {cfg.sleep} --memory {cfg.memory} --dist_url {cfg.dist_url} --logger_rank {cfg.logger_rank} {" ".join(cfg.opts)}'
 	for opt in cfg.opts:
 		cfg_ghost = cfg
-		ks, v = opt.split('=')
+		ks, v = opt.split('=', 1)  # Split only on first '='
 		ks = ks.split('.')
 		try:
 			v = literal_eval(v)

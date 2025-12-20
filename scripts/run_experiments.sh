@@ -77,31 +77,25 @@ echo "=============================================="
 # Baseline: Only reconstruction loss (CosLoss)
 echo "[2.1] Ablation: CosLoss only..."
 CUDA_VISIBLE_DEVICES=$GPU python run.py \
-    -c configs/rd/rd_byol_mvtec.py \
+    -c configs/rd/ablation/rd_cos_only.py \
     -m train \
     seed=$SEED \
-    "loss.loss_terms=[dict(type='CosLoss', name='cos', avg=False, lam=1.0)]" \
-    trainer.logdir_sub="ablation_cos_only" \
     2>&1 | tee "$LOG_DIR/ablation_cos_only.log"
 
 # CosLoss + Dense BYOL (no prototype)
 echo "[2.2] Ablation: CosLoss + DenseBYOL..."
 CUDA_VISIBLE_DEVICES=$GPU python run.py \
-    -c configs/rd/rd_byol_mvtec.py \
+    -c configs/rd/ablation/rd_cos_dense.py \
     -m train \
     seed=$SEED \
-    "loss.loss_terms=[dict(type='CosLoss', name='cos', avg=False, lam=1.0), dict(type='BYOLDenseLoss', name='dense', lam=1.0, use_spatial_matching=True)]" \
-    trainer.logdir_sub="ablation_cos_dense" \
     2>&1 | tee "$LOG_DIR/ablation_cos_dense.log"
 
 # CosLoss + Prototype InfoNCE (no dense)
 echo "[2.3] Ablation: CosLoss + PrototypeInfoNCE..."
 CUDA_VISIBLE_DEVICES=$GPU python run.py \
-    -c configs/rd/rd_byol_mvtec.py \
+    -c configs/rd/ablation/rd_cos_proto.py \
     -m train \
     seed=$SEED \
-    "loss.loss_terms=[dict(type='CosLoss', name='cos', avg=False, lam=1.0), dict(type='PrototypeInfoNCELoss', name='proto', lam=1.0, n_prototypes=5, temperature=0.07)]" \
-    trainer.logdir_sub="ablation_cos_proto" \
     2>&1 | tee "$LOG_DIR/ablation_cos_proto.log"
 
 # Full model (CosLoss + Dense + Prototype)
@@ -110,7 +104,6 @@ CUDA_VISIBLE_DEVICES=$GPU python run.py \
     -c configs/rd/rd_byol_mvtec.py \
     -m train \
     seed=$SEED \
-    trainer.logdir_sub="ablation_full" \
     2>&1 | tee "$LOG_DIR/ablation_full.log"
 
 echo "Ablation study completed!"
