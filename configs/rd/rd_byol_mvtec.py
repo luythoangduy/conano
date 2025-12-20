@@ -176,13 +176,13 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
         self.trainer.data.batch_size = self.batch_train
         self.trainer.data.batch_size_per_gpu_test = self.batch_test_per
 
-        # ==> loss (BYOL losses - NO negative samples, NO supervision!)
+        # ==> loss
         self.loss.loss_terms = [
             dict(type='CosLoss', name='cos', avg=False, lam=1.0),
             # Dense BYOL: local features with spatial matching
             dict(type='BYOLDenseLoss', name='dense', lam=1.0, use_spatial_matching=True),
-            # Global BYOL: class-level features (unsupervised, no labels needed)
-            dict(type='BYOLGlobalLoss', name='scl', lam=1.0),
+            # Prototype InfoNCE: global features with prototype learning
+            dict(type='PrototypeInfoNCELoss', name='proto', lam=1.0, n_prototypes=5, temperature=0.07),
         ]
 
         # Note: ClassAwareBYOLDenseLoss doesn't work well with small batch_size
@@ -195,7 +195,7 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
             dict(name='optim_t', fmt=':>5.3f'),
             dict(name='lr', fmt=':>7.6f'),
             dict(name='cos', suffixes=[''], fmt=':>5.3f', add_name='avg'),
-            dict(name='glb', suffixes=[''], fmt=':>5.3f', add_name='avg'),
+            dict(name='proto', suffixes=[''], fmt=':>5.3f', add_name='avg'),
             dict(name='dense', suffixes=[''], fmt=':>5.3f', add_name='avg'),
         ]
         self.logging.log_terms_test = [

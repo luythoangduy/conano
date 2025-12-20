@@ -7,26 +7,7 @@ from configs.__base__ import *
 
 
 class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
-    """
-    Config for RDLGC with BYOL + Prototype Learning on VisA dataset.
-
-    Key features:
-    1. model.name = 'rd_lgc_byol' (uses BYOL architecture)
-    2. trainer.name = 'RDLGCBYOLTrainer' (updates momentum encoder)
-    3. loss: BYOLGlobalLossWithPrototype (BYOL + PAPN-style prototypes)
-    4. momentum_schedule = 'cosine' (momentum increases during training)
-
-    Prototype Learning:
-    - 5 orthonormal prototypes initialized via SVD
-    - Online/Target features query prototypes → enhanced features
-    - InfoNCE loss on prototype-enhanced features
-    - Combined with original BYOL loss
-
-    Optimized for VisA dataset:
-    - Larger image size (256x256)
-    - Longer training (100 epochs)
-    - Stronger augmentation
-    """
+    """Config for BorAD on Real-IAD dataset."""
 
     def __init__(self):
         cfg_common.__init__(self)
@@ -36,29 +17,22 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
         self.fvcore_b = 1
         self.fvcore_c = 3
         self.seed = 42
-        self.size = 256  # VisA uses 256x256
+        self.size = 256
         self.epoch_full = 100
         self.warmup_epochs = 0
         self.test_start_epoch = self.epoch_full
         self.test_per_epoch = self.epoch_full // 10
         self.batch_train = 16
         self.batch_test_per = 16
-        self.lr = 0.005 * self.batch_train / 16
+        self.lr = 0.001 * self.batch_train / 16
         self.weight_decay = 0.05
-        self.metrics = [
-            'mAUROC_sp_max',
-            'mAUPRO_px',
-            'mAUROC_px'
-        ]
+        self.metrics = ['mAUROC_sp_max', 'mAUPRO_px', 'mAUROC_px']
         self.use_adeval = True
-        self.lambda_1 = 1
-        self.lambda_2 = 1
         self.vis = False
 
-        # ==> data (VisA dataset)
+        # ==> data
         self.data.type = 'DefaultAD'
-        self.data.root = 'data/visa'  # Changed to VisA
-        self.data.anomaly_source_path = ''
+        self.data.root = 'data/realiad'
         self.data.meta = 'meta.json'
         self.data.resize_shape = [self.size, self.size]
         self.data.cls_names = []
@@ -76,8 +50,6 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
             dict(type='CenterCrop', size=(self.size, self.size)),
             dict(type='ToTensor'),
         ]
-
-        # Strong augmentations for BYOL
         self.data.aug_transforms = [
             dict(type='RandomResizedCrop', size=(self.size, self.size), scale=(0.8, 1.0)),
             dict(type='RandomHorizontalFlip', p=0.5),
@@ -90,8 +62,7 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
             dict(type='Normalize', mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD, inplace=True),
         ]
 
-        # ==> model (BYOL-style)
-        checkpoint_path = ''
+        # ==> model
         self.model_t = Namespace()
         self.model_t.name = 'timm_wide_resnet50_2'
         self.model_t.kwargs = dict(pretrained=True, checkpoint_path='',
@@ -103,16 +74,10 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
         self.model = Namespace()
         self.model.name = 'rd_lgc_byol'
         self.model.kwargs = dict(
-            pretrained=False,
-            checkpoint_path=checkpoint_path,
-            strict=True,
-            model_t=self.model_t,
-            model_s=self.model_s,
-            dp=False,
-            momentum=0.99,
-            momentum_schedule='cosine',
-            momentum_start=0.9,
-            momentum_end=0.999
+            pretrained=False, checkpoint_path='', strict=True,
+            model_t=self.model_t, model_s=self.model_s, dp=False,
+            momentum=0.99, momentum_schedule='cosine',
+            momentum_start=0.9, momentum_end=0.999
         )
 
         # ==> evaluator
@@ -131,49 +96,26 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
         self.trainer.logdir_sub = ''
         self.trainer.resume_dir = ''
         self.trainer.epoch_full = self.epoch_full
-
         self.trainer.scheduler_kwargs = dict(
-            name='step',
-            lr_noise=None,
-            noise_pct=0.67,
-            noise_std=1.0,
-            noise_seed=42,
-            lr_min=self.lr / 1e2,
-            warmup_lr=self.lr / 1e3,
-            warmup_iters=-1,
-            cooldown_iters=0,
-            warmup_epochs=self.warmup_epochs,
-            cooldown_epochs=0,
-            use_iters=True,
-            patience_iters=0,
-            patience_epochs=0,
-            decay_iters=0,
-            decay_epochs=int(self.epoch_full * 0.8),
-            cycle_decay=0.1,
-            decay_rate=0.1
+            name='step', lr_noise=None, noise_pct=0.67, noise_std=1.0, noise_seed=42,
+            lr_min=self.lr / 1e2, warmup_lr=self.lr / 1e3, warmup_iters=-1,
+            cooldown_iters=0, warmup_epochs=self.warmup_epochs, cooldown_epochs=0,
+            use_iters=True, patience_iters=0, patience_epochs=0, decay_iters=0,
+            decay_epochs=int(self.epoch_full * 0.8), cycle_decay=0.1, decay_rate=0.1
         )
-        self.trainer.mixup_kwargs = dict(mixup_alpha=0.8, cutmix_alpha=1.0, cutmix_minmax=None, prob=0.0,
-                                         switch_prob=0.5, mode='batch', correct_lam=True, label_smoothing=0.1)
+        self.trainer.mixup_kwargs = dict(mixup_alpha=0.8, cutmix_alpha=1.0, cutmix_minmax=None,
+                                         prob=0.0, switch_prob=0.5, mode='batch',
+                                         correct_lam=True, label_smoothing=0.1)
         self.trainer.test_start_epoch = self.test_start_epoch
         self.trainer.test_per_epoch = self.test_per_epoch
-
         self.trainer.data.batch_size = self.batch_train
         self.trainer.data.batch_size_per_gpu_test = self.batch_test_per
 
-        # ==> loss (BYOL with Prototype Learning)
+        # ==> loss
         self.loss.loss_terms = [
             dict(type='CosLoss', name='cos', avg=False, lam=1.0),
             dict(type='BYOLDenseLoss', name='dense', lam=1.0, use_spatial_matching=True),
-
-            # Global BYOL with Prototype Learning (same as MVTec)
-            dict(
-                type='BYOLGlobalLossWithPrototype',
-                name='scl',
-                lam=1.0,
-                lam_proto=1.0,
-                n_prototypes=5,
-                temperature=0.07
-            ),
+            dict(type='PrototypeInfoNCELoss', name='proto', lam=1.0, n_prototypes=5, temperature=0.07),
         ]
 
         # ==> logging
@@ -183,7 +125,7 @@ class cfg(cfg_common, cfg_dataset_default, cfg_model_rd):
             dict(name='optim_t', fmt=':>5.3f'),
             dict(name='lr', fmt=':>7.6f'),
             dict(name='cos', suffixes=[''], fmt=':>5.3f', add_name='avg'),
-            dict(name='glb', suffixes=[''], fmt=':>5.3f', add_name='avg'),
+            dict(name='proto', suffixes=[''], fmt=':>5.3f', add_name='avg'),
             dict(name='dense', suffixes=[''], fmt=':>5.3f', add_name='avg'),
         ]
         self.logging.log_terms_test = [

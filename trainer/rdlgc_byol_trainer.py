@@ -178,8 +178,8 @@ class RDLGCBYOLTrainer(BaseTrainer):
             # === Reconstruction loss (cosine similarity) ===
             loss_cos = self.loss_terms['cos'](self.feats_t, self.feats_s)
 
-            # === Global BYOL loss (unsupervised, no labels needed) ===
-            loss_glb = self.loss_terms['scl'](self.glb_feats, self.glb_feats_k, self.labels)
+            # === Prototype InfoNCE loss ===
+            loss_glb = self.loss_terms['proto'](self.glb_feats, self.glb_feats_k, self.labels)
             
             # === BYOL Dense loss (no negatives!) ===
             # Note: q_grid has predictor output, k_grid doesn't
@@ -207,7 +207,7 @@ class RDLGCBYOLTrainer(BaseTrainer):
         loss_total_val = reduce_tensor(loss, self.world_size).clone().detach().item()
 
         update_log_term(self.log_terms.get('cos'), loss_cos_val, 1, self.master)
-        update_log_term(self.log_terms.get('glb'), loss_glb_val, 1, self.master)
+        update_log_term(self.log_terms.get('proto'), loss_glb_val, 1, self.master)
         update_log_term(self.log_terms.get('dense'), loss_den_val, 1, self.master)
 
         # WandB logging
@@ -215,7 +215,7 @@ class RDLGCBYOLTrainer(BaseTrainer):
             log_dict = {
                 'train/loss_total': loss_total_val,
                 'train/loss_cos': loss_cos_val,
-                'train/loss_global': loss_glb_val,
+                'train/loss_proto': loss_glb_val,
                 'train/loss_dense': loss_den_val,
                 'train/lr': self.optim.proj_opt.param_groups[0]['lr'],
                 'train/epoch': self.epoch,
@@ -228,11 +228,6 @@ class RDLGCBYOLTrainer(BaseTrainer):
                 current_momentum = current_momentum.item()
             log_dict['train/momentum'] = current_momentum
 
-            # Log individual loss components if using BYOLGlobalLossWithPrototype
-            if hasattr(self.loss_terms['scl'], 'last_byol_loss'):
-                log_dict['train/loss_byol'] = self.loss_terms['scl'].last_byol_loss
-            if hasattr(self.loss_terms['scl'], 'last_proto_loss'):
-                log_dict['train/loss_prototype'] = self.loss_terms['scl'].last_proto_loss
 
             wandb.log(log_dict, step=self.iter)
 
